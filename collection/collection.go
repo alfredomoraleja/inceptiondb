@@ -1,7 +1,7 @@
 package collection
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,14 +17,13 @@ import (
 )
 
 type Collection struct {
-	Filename  string // Just informative...
-	file      *os.File
-	writer    *bufio.Writer
-	encoder   *json.Encoder
-	Rows      []*Row
-	rowsMutex *sync.Mutex
-	persistMu *sync.Mutex
-	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
+	Filename    string // Just informative...
+	file        *os.File
+	encoderPool sync.Pool
+	Rows        []*Row
+	rowsMutex   *sync.Mutex
+	persistMu   *sync.Mutex
+	Indexes     map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
 	// buffer   *bufio.Writer // TODO: use write buffer to improve performance (x3 in tests)
 	Defaults map[string]any
 	Count    int64
@@ -141,10 +140,22 @@ func OpenCollection(filename string) (*Collection, error) {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
 
-	collection.writer = bufio.NewWriterSize(collection.file, 64*1024)
-	collection.encoder = json.NewEncoder(collection.writer)
+	collection.encoderPool = sync.Pool{
+		New: func() interface{} {
+			buf := bytes.NewBuffer(make([]byte, 0, 1024))
+			return &journalEncoder{
+				buf: buf,
+				enc: json.NewEncoder(buf),
+			}
+		},
+	}
 
 	return collection, nil
+}
+
+type journalEncoder struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
 }
 
 func (c *Collection) addRow(payload json.RawMessage) (*Row, error) {
@@ -518,25 +529,12 @@ func (c *Collection) Close() error {
 	c.persistMu.Lock()
 	defer c.persistMu.Unlock()
 
-	var flushErr error
-	if c.writer != nil {
-		if err := c.writer.Flush(); err != nil {
-			flushErr = fmt.Errorf("flush: %w", err)
-		}
-	}
-
 	var closeErr error
 	if c.file != nil {
 		closeErr = c.file.Close()
 	}
 
 	c.file = nil
-	c.writer = nil
-	c.encoder = nil
-
-	if flushErr != nil {
-		return flushErr
-	}
 
 	return closeErr
 }
@@ -593,19 +591,30 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 }
 
 func (c *Collection) persistCommand(command *Command) error {
-	if c.encoder == nil {
+	if c.file == nil {
 		return fmt.Errorf("collection is closed")
 	}
+
+	encoder := c.encoderPool.Get().(*journalEncoder)
+	defer c.encoderPool.Put(encoder)
+
+	encoder.buf.Reset()
+
+	if err := encoder.enc.Encode(command); err != nil {
+		return fmt.Errorf("json encode command: %w", err)
+	}
+
+	data := encoder.buf.Bytes()
 
 	c.persistMu.Lock()
 	defer c.persistMu.Unlock()
 
-	if err := c.encoder.Encode(command); err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if c.file == nil {
+		return fmt.Errorf("collection is closed")
 	}
 
-	if err := c.writer.Flush(); err != nil {
-		return fmt.Errorf("flush: %w", err)
+	if _, err := c.file.Write(data); err != nil {
+		return fmt.Errorf("write: %w", err)
 	}
 
 	return nil

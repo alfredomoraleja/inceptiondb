@@ -1,6 +1,7 @@
 package collection
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,8 +19,11 @@ import (
 type Collection struct {
 	Filename  string // Just informative...
 	file      *os.File
+	writer    *bufio.Writer
+	encoder   *json.Encoder
 	Rows      []*Row
 	rowsMutex *sync.Mutex
+	persistMu *sync.Mutex
 	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
 	// buffer   *bufio.Writer // TODO: use write buffer to improve performance (x3 in tests)
 	Defaults map[string]any
@@ -49,6 +53,7 @@ func OpenCollection(filename string) (*Collection, error) {
 	collection := &Collection{
 		Rows:      []*Row{},
 		rowsMutex: &sync.Mutex{},
+		persistMu: &sync.Mutex{},
 		Filename:  filename,
 		Indexes:   map[string]*collectionIndex{},
 	}
@@ -136,6 +141,9 @@ func OpenCollection(filename string) (*Collection, error) {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
 
+	collection.writer = bufio.NewWriterSize(collection.file, 64*1024)
+	collection.encoder = json.NewEncoder(collection.writer)
+
 	return collection, nil
 }
 
@@ -211,9 +219,8 @@ func (c *Collection) Insert(item interface{}) (*Row, error) {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return nil, fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return nil, err
 	}
 
 	return row, nil
@@ -282,12 +289,7 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 // IndexMap create a unique index with a name
@@ -349,12 +351,7 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 func indexInsert(indexes map[string]*collectionIndex, row *Row) (err error) {
@@ -453,13 +450,7 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		// TODO: panic?
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 func (c *Collection) Patch(row *Row, patch interface{}) error {
@@ -520,18 +511,34 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 func (c *Collection) Close() error {
-	err := c.file.Close()
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
+	var flushErr error
+	if c.writer != nil {
+		if err := c.writer.Flush(); err != nil {
+			flushErr = fmt.Errorf("flush: %w", err)
+		}
+	}
+
+	var closeErr error
+	if c.file != nil {
+		closeErr = c.file.Close()
+	}
+
 	c.file = nil
-	return err
+	c.writer = nil
+	c.encoder = nil
+
+	if flushErr != nil {
+		return flushErr
+	}
+
+	return closeErr
 }
 
 func (c *Collection) Drop() error {
@@ -582,9 +589,23 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
+	return c.persistCommand(command)
+}
+
+func (c *Collection) persistCommand(command *Command) error {
+	if c.encoder == nil {
+		return fmt.Errorf("collection is closed")
+	}
+
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
+	if err := c.encoder.Encode(command); err != nil {
 		return fmt.Errorf("json encode command: %w", err)
+	}
+
+	if err := c.writer.Flush(); err != nil {
+		return fmt.Errorf("flush: %w", err)
 	}
 
 	return nil

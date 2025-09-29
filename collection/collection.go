@@ -21,10 +21,11 @@ type Collection struct {
 	file      *os.File
 	Rows      []*Row
 	rowsMutex *sync.Mutex
-	persistMu *sync.Mutex
+	fileMu    *sync.RWMutex
 	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
 	Defaults  map[string]any
 	Count     int64
+	offset    int64
 }
 
 type collectionIndex struct {
@@ -50,7 +51,7 @@ func OpenCollection(filename string) (*Collection, error) {
 	collection := &Collection{
 		Rows:      []*Row{},
 		rowsMutex: &sync.Mutex{},
-		persistMu: &sync.Mutex{},
+		fileMu:    &sync.RWMutex{},
 		Filename:  filename,
 		Indexes:   map[string]*collectionIndex{},
 	}
@@ -131,12 +132,18 @@ func OpenCollection(filename string) (*Collection, error) {
 		}
 	}
 
-	// Open file for append only
+	// Open file for append-only use
 	// todo: investigate O_SYNC
-	collection.file, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+	collection.file, err = os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
+
+	info, err := collection.file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat file: %w", err)
+	}
+	collection.offset = info.Size()
 
 	return collection, nil
 }
@@ -509,14 +516,14 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 }
 
 func (c *Collection) Close() error {
-	c.persistMu.Lock()
-	defer c.persistMu.Unlock()
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
 
-	var closeErr error
-	if c.file != nil {
-		closeErr = c.file.Close()
+	if c.file == nil {
+		return nil
 	}
 
+	closeErr := c.file.Close()
 	c.file = nil
 
 	return closeErr
@@ -574,33 +581,39 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 }
 
 func (c *Collection) persistCommand(command *Command) error {
-	if c.file == nil {
-		return fmt.Errorf("collection is closed")
-	}
-
 	dataPtr := commandBufferPool.Get().(*[]byte)
-	buf := (*dataPtr)[:0]
-	buf = encodeCommand(buf, command)
-
-	c.persistMu.Lock()
-	defer c.persistMu.Unlock()
-
-	if c.file == nil {
+	buf := encodeCommand((*dataPtr)[:0], command)
+	defer func(b []byte) {
+		*dataPtr = b[:0]
 		commandBufferPool.Put(dataPtr)
+	}(buf)
+
+	c.fileMu.RLock()
+	file := c.file
+	if file == nil {
+		c.fileMu.RUnlock()
 		return fmt.Errorf("collection is closed")
 	}
 
-	if n, err := c.file.Write(buf); err != nil {
-		commandBufferPool.Put(dataPtr)
+	offset := atomic.AddInt64(&c.offset, int64(len(buf))) - int64(len(buf))
+	err := writeFullAt(file, buf, offset)
+	c.fileMu.RUnlock()
+	if err != nil {
 		return fmt.Errorf("write: %w", err)
-	} else if n != len(buf) {
-		commandBufferPool.Put(dataPtr)
-		return io.ErrShortWrite
 	}
 
-	*dataPtr = buf[:0]
-	commandBufferPool.Put(dataPtr)
+	return nil
+}
 
+func writeFullAt(f *os.File, data []byte, offset int64) error {
+	for len(data) > 0 {
+		n, err := f.WriteAt(data, offset)
+		if err != nil {
+			return err
+		}
+		data = data[n:]
+		offset += int64(n)
+	}
 	return nil
 }
 

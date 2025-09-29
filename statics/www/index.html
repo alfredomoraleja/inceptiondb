@@ -259,23 +259,30 @@
                       :key="idx"
                       class="rounded-lg border border-slate-800 bg-slate-950 p-4"
                     >
-                      <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
-                        <span>Document #{{ offset + idx + 1 }}</span>
-                        <button
-                          v-if="canDeleteRow(row)"
-                          type="button"
-                          class="rounded-md border border-rose-500/40 bg-rose-600/20 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-600/30 transition"
-                          @click="deleteRow(row)"
-                        >
-                          Delete
-                        </button>
+                      <div class="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                        <span class="text-xs text-slate-400">Document #{{ offset + idx + 1 }}</span>
+                        <div v-if="canEditRow(row) || canDeleteRow(row)" class="flex items-center gap-2">
+                          <button
+                            v-if="canEditRow(row)"
+                            type="button"
+                            class="rounded-md border border-sky-500/40 bg-sky-600/20 px-2 py-1 text-xs font-semibold text-sky-200 hover:bg-sky-600/30 transition"
+                            @click="openEditDialog(row)"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            v-if="canDeleteRow(row)"
+                            type="button"
+                            class="rounded-md border border-rose-500/40 bg-rose-600/20 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-600/30 transition"
+                            @click="deleteRow(row)"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
                       <pre class="whitespace-pre-wrap break-words text-sm text-slate-200 font-mono">{{ formatDocument(row) }}</pre>
-                      <p v-if="!canDeleteRow(row) && activeIndex && activeIndex.type === 'map'" class="mt-3 text-xs text-slate-500">
-                        The document does not contain the "{{ activeIndex.field }}" field required for deletion.
-                      </p>
-                      <p v-else-if="activeIndex && activeIndex.type !== 'map'" class="mt-3 text-xs text-slate-500">
-                        Select a "map" index to enable direct deletion.
+                      <p v-if="missingDocumentKeyField(row)" class="mt-3 text-xs text-slate-500">
+                        The document does not contain the "{{ documentKeyFieldName }}" field required for editing or deletion.
                       </p>
                     </div>
                   </div>
@@ -491,8 +498,65 @@
       </main>
     </div>
 
+    <div
+      v-if="editDialog.open"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div class="w-full max-w-3xl overflow-hidden rounded-xl border border-slate-800 bg-slate-900 shadow-xl">
+        <header class="flex items-start justify-between gap-3 border-b border-slate-800 px-6 py-4">
+          <div class="space-y-1">
+            <h3 class="text-lg font-semibold text-slate-100">Edit document</h3>
+            <p class="text-xs text-slate-400">
+              Updating document where {{ editDialog.keyField }} = {{ editDialog.valueLabel }} in collection
+              "{{ editDialog.collectionName }}".
+            </p>
+          </div>
+          <button
+            type="button"
+            class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            @click="closeEditDialog"
+            :disabled="editDialog.saving"
+          >
+            Close
+          </button>
+        </header>
+        <form class="space-y-4 px-6 py-5" @submit.prevent="submitEdit">
+          <div>
+            <label class="block text-xs uppercase tracking-wide text-slate-400">Document (JSON)</label>
+            <textarea
+              v-model="editDialog.text"
+              rows="12"
+              class="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-70"
+              :disabled="editDialog.saving"
+            ></textarea>
+          </div>
+          <p v-if="editDialog.error" class="text-sm text-rose-400">{{ editDialog.error }}</p>
+          <div class="flex justify-end gap-3">
+            <button
+              type="button"
+              class="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              @click="closeEditDialog"
+              :disabled="editDialog.saving"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-500 transition disabled:cursor-not-allowed disabled:opacity-70"
+              :disabled="editDialog.saving"
+            >
+              {{ editDialog.saving ? 'Saving…' : 'Save changes' }}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <script>
       const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount } = Vue;
+      const DOCUMENT_KEY_FIELD = 'id';
 
       createApp({
         setup() {
@@ -537,6 +601,17 @@
           });
           const MAX_ACTIVITY_LOG_ENTRIES = 50;
           const activityLog = ref([]);
+          const editDialog = reactive({
+            open: false,
+            text: '',
+            error: '',
+            saving: false,
+            keyField: '',
+            keyValue: null,
+            valueLabel: '',
+            original: null,
+            collectionName: '',
+          });
 
           const timeFormatter = new Intl.DateTimeFormat('en-US', {
             hour: 'numeric',
@@ -700,6 +775,96 @@
             if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
             if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
             return n;
+          };
+
+          const formatValueLabel = (value) => {
+            if (typeof value === 'string') {
+              return `"${value}"`;
+            }
+            if (typeof value === 'number' || typeof value === 'boolean') {
+              return String(value);
+            }
+            if (value === null) {
+              return 'null';
+            }
+            try {
+              return JSON.stringify(value);
+            } catch (err) {
+              return String(value);
+            }
+          };
+
+          const isObjectRow = (row) => row && typeof row === 'object' && !Array.isArray(row);
+
+          const hasRawMarker = (row) => isObjectRow(row) && Object.prototype.hasOwnProperty.call(row, '_raw');
+
+          const documentHasKeyField = (row) =>
+            isObjectRow(row) &&
+            !hasRawMarker(row) &&
+            Object.prototype.hasOwnProperty.call(row, DOCUMENT_KEY_FIELD);
+
+          const missingDocumentKeyField = (row) =>
+            isObjectRow(row) &&
+            !hasRawMarker(row) &&
+            !Object.prototype.hasOwnProperty.call(row, DOCUMENT_KEY_FIELD);
+
+          const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+          const deepEqual = (a, b) => {
+            if (a === b) return true;
+            if (Number.isNaN(a) && Number.isNaN(b)) return true;
+            if (typeof a !== typeof b) return false;
+            if (a === null || b === null) return a === b;
+            if (Array.isArray(a) && Array.isArray(b)) {
+              if (a.length !== b.length) return false;
+              for (let i = 0; i < a.length; i += 1) {
+                if (!deepEqual(a[i], b[i])) return false;
+              }
+              return true;
+            }
+            if (isPlainObject(a) && isPlainObject(b)) {
+              const keysA = Object.keys(a);
+              const keysB = Object.keys(b);
+              if (keysA.length !== keysB.length) return false;
+              for (const key of keysA) {
+                if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+                if (!deepEqual(a[key], b[key])) return false;
+              }
+              return true;
+            }
+            return false;
+          };
+
+          const buildPatchObject = (original, updated) => {
+            if (deepEqual(original, updated)) {
+              return {};
+            }
+            if (!isPlainObject(original) || !isPlainObject(updated)) {
+              return updated;
+            }
+            const patch = {};
+            const keys = new Set([...Object.keys(original), ...Object.keys(updated)]);
+            keys.forEach((key) => {
+              if (!Object.prototype.hasOwnProperty.call(updated, key)) {
+                patch[key] = null;
+                return;
+              }
+              const origVal = original[key];
+              const newVal = updated[key];
+              if (deepEqual(origVal, newVal)) {
+                return;
+              }
+              if (isPlainObject(origVal) && isPlainObject(newVal)) {
+                const nestedPatch = buildPatchObject(origVal, newVal);
+                if (isPlainObject(nestedPatch) && Object.keys(nestedPatch).length === 0) {
+                  return;
+                }
+                patch[key] = nestedPatch;
+              } else {
+                patch[key] = newVal;
+              }
+            });
+            return patch;
           };
 
           const isSelected = (name) => selectedCollectionName.value === name;
@@ -920,6 +1085,110 @@
             }
           };
 
+          const closeEditDialog = () => {
+            editDialog.open = false;
+            editDialog.text = '';
+            editDialog.error = '';
+            editDialog.saving = false;
+            editDialog.keyField = '';
+            editDialog.keyValue = null;
+            editDialog.valueLabel = '';
+            editDialog.original = null;
+            editDialog.collectionName = '';
+          };
+
+          const openEditDialog = (row) => {
+            if (!selectedCollection.value || !canEditRow(row)) return;
+            const value = row[DOCUMENT_KEY_FIELD];
+            if (value === undefined) {
+              editDialog.error = `The document is missing a value for "${DOCUMENT_KEY_FIELD}".`;
+              return;
+            }
+            let originalCopy;
+            try {
+              originalCopy = JSON.parse(JSON.stringify(row));
+            } catch (err) {
+              editDialog.error = 'Failed to prepare the document for editing.';
+              return;
+            }
+            editDialog.keyField = DOCUMENT_KEY_FIELD;
+            editDialog.keyValue = value;
+            editDialog.collectionName = selectedCollection.value.name;
+            editDialog.valueLabel = formatValueLabel(value);
+            editDialog.text = JSON.stringify(originalCopy, null, 2);
+            editDialog.original = originalCopy;
+            editDialog.error = '';
+            editDialog.saving = false;
+            editDialog.open = true;
+          };
+
+          const submitEdit = async () => {
+            if (!editDialog.open) return;
+            editDialog.error = '';
+            let parsed;
+            try {
+              parsed = JSON.parse(editDialog.text);
+            } catch (err) {
+              editDialog.error = 'Invalid JSON: ' + err.message;
+              return;
+            }
+            if (!isPlainObject(parsed)) {
+              editDialog.error = 'The document must be a JSON object.';
+              return;
+            }
+            if (!isPlainObject(editDialog.original)) {
+              editDialog.error = 'The original document is not available for comparison.';
+              return;
+            }
+            const patch = buildPatchObject(editDialog.original, parsed);
+            if (!patch || (isPlainObject(patch) && Object.keys(patch).length === 0)) {
+              editDialog.error = 'No changes detected.';
+              return;
+            }
+            const collectionName = editDialog.collectionName || selectedCollection.value?.name;
+            if (!collectionName) {
+              editDialog.error = 'Select a collection before editing.';
+              return;
+            }
+            const keyField = editDialog.keyField || DOCUMENT_KEY_FIELD;
+            const keyValue = editDialog.keyValue;
+            if (keyValue === undefined) {
+              editDialog.error = 'Document identifier is missing.';
+              return;
+            }
+            const url = `/v1/collections/${encodeURIComponent(collectionName)}:patch`;
+            editDialog.saving = true;
+            const entry = createActivityEntry({
+              label: `Update document by ${keyField}`,
+              method: 'POST',
+              url,
+              target: collectionName,
+            });
+            try {
+              const resp = await axios.post(url, {
+                filter: {
+                  [keyField]: keyValue,
+                },
+                limit: 1,
+                patch,
+              });
+              markConnectionOnline();
+              completeActivityEntry(entry, {
+                detail: `Updated document where ${keyField} = ${editDialog.valueLabel}.`,
+                statusCode: resp.status,
+              });
+              closeEditDialog();
+              await runQuery();
+              await loadCollections();
+            } catch (error) {
+              editDialog.error = error?.response?.data?.error || 'Failed to update the document.';
+              failActivityEntry(entry, error, { fallback: 'Failed to update the document.' });
+              handleRequestError(error);
+            } finally {
+              editDialog.saving = false;
+            }
+          };
+
           watch(
             () => indexForm.type,
             () => {
@@ -935,6 +1204,9 @@
             mapValue.value = '';
             reverse.value = false;
             resetRangeFields();
+            if (editDialog.open) {
+              closeEditDialog();
+            }
           });
 
           watch(selectedCollection, async (collection) => {
@@ -954,6 +1226,9 @@
             resetIndexForm();
             indexMessages.error = '';
             indexMessages.success = '';
+            if (editDialog.open) {
+              closeEditDialog();
+            }
             if (collection) {
               await loadIndexes();
               await runQuery();
@@ -1162,42 +1437,43 @@
             runQuery();
           });
 
-          const canDeleteRow = (row) => {
-            const index = activeIndex.value;
-            if (!index || index.type !== 'map') return false;
-            const field = index.field;
-            if (!field) return false;
-            return Object.prototype.hasOwnProperty.call(row, field);
-          };
+          const canEditRow = (row) => documentHasKeyField(row);
+
+          const canDeleteRow = (row) => documentHasKeyField(row);
 
           const deleteRow = async (row) => {
-            const index = activeIndex.value;
-            if (!selectedCollection.value || !index || index.type !== 'map' || !index.field) return;
-            const value = row[index.field];
+            if (!selectedCollection.value || !canDeleteRow(row)) return;
+            const value = row[DOCUMENT_KEY_FIELD];
             if (value === undefined) {
-              queryError.value = `The document does not contain the field "${index.field}".`;
+              queryError.value = `The document is missing a value for "${DOCUMENT_KEY_FIELD}".`;
               return;
             }
-            const ok = window.confirm(`Delete the document where ${index.field} = ${value}?`);
+            const collectionName = selectedCollection.value.name;
+            const valueLabel = formatValueLabel(value);
+            const ok = window.confirm(`Delete the document where ${DOCUMENT_KEY_FIELD} = ${valueLabel}?`);
             if (!ok) return;
-            const url = `/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:remove`;
+            const url = `/v1/collections/${encodeURIComponent(collectionName)}:remove`;
             const entry = createActivityEntry({
-              label: `Delete document by ${index.field}`,
+              label: `Delete document by ${DOCUMENT_KEY_FIELD}`,
               method: 'POST',
               url,
-              target: selectedCollection.value.name,
+              target: collectionName,
             });
             try {
               const resp = await axios.post(url, {
-                mode: 'unique',
-                field: index.field,
-                value,
+                filter: {
+                  [DOCUMENT_KEY_FIELD]: value,
+                },
+                limit: 1,
               });
               markConnectionOnline();
               completeActivityEntry(entry, {
-                detail: `Deleted document where ${index.field} = ${value}.`,
+                detail: `Deleted document where ${DOCUMENT_KEY_FIELD} = ${valueLabel}.`,
                 statusCode: resp.status,
               });
+              if (editDialog.open) {
+                closeEditDialog();
+              }
               await runQuery();
               await loadCollections();
             } catch (error) {
@@ -1370,6 +1646,7 @@
             pageSizeOptions,
             offset,
             pageInfo,
+            editDialog,
             // methods
             prettyTotal,
             isSelected,
@@ -1385,7 +1662,13 @@
             createCollection,
             dropCollection,
             deleteRow,
+            openEditDialog,
+            closeEditDialog,
+            submitEdit,
             canDeleteRow,
+            canEditRow,
+            missingDocumentKeyField,
+            documentKeyFieldName: DOCUMENT_KEY_FIELD,
             formatDocument,
             refreshConnectionStatus,
             formatActivityTime,

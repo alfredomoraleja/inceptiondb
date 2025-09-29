@@ -1,11 +1,12 @@
 package collection
 
 import (
-	"bytes"
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,16 +18,15 @@ import (
 )
 
 type Collection struct {
-	Filename    string // Just informative...
-	file        *os.File
-	encoderPool sync.Pool
-	Rows        []*Row
-	rowsMutex   *sync.Mutex
-	persistMu   *sync.Mutex
-	Indexes     map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
-	// buffer   *bufio.Writer // TODO: use write buffer to improve performance (x3 in tests)
-	Defaults map[string]any
-	Count    int64
+	Filename  string // Just informative...
+	file      *os.File
+	buffer    *bufio.Writer
+	Rows      []*Row
+	rowsMutex *sync.Mutex
+	persistMu *sync.Mutex
+	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
+	Defaults  map[string]any
+	Count     int64
 }
 
 type collectionIndex struct {
@@ -140,22 +140,12 @@ func OpenCollection(filename string) (*Collection, error) {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
 
-	collection.encoderPool = sync.Pool{
-		New: func() interface{} {
-			buf := bytes.NewBuffer(make([]byte, 0, 1024))
-			return &journalEncoder{
-				buf: buf,
-				enc: json.NewEncoder(buf),
-			}
-		},
-	}
+	// allocate a buffered writer large enough to hold multiple commands before
+	// flushing to the operating system. This amortizes syscalls during bursts of
+	// inserts while still allowing explicit flushes on close.
+	collection.buffer = bufio.NewWriterSize(collection.file, 512*1024)
 
 	return collection, nil
-}
-
-type journalEncoder struct {
-	buf *bytes.Buffer
-	enc *json.Encoder
 }
 
 func (c *Collection) addRow(payload json.RawMessage) (*Row, error) {
@@ -530,11 +520,17 @@ func (c *Collection) Close() error {
 	defer c.persistMu.Unlock()
 
 	var closeErr error
+	if c.buffer != nil {
+		if err := c.buffer.Flush(); err != nil {
+			closeErr = err
+		}
+	}
 	if c.file != nil {
 		closeErr = c.file.Close()
 	}
 
 	c.file = nil
+	c.buffer = nil
 
 	return closeErr
 }
@@ -595,16 +591,7 @@ func (c *Collection) persistCommand(command *Command) error {
 		return fmt.Errorf("collection is closed")
 	}
 
-	encoder := c.encoderPool.Get().(*journalEncoder)
-	defer c.encoderPool.Put(encoder)
-
-	encoder.buf.Reset()
-
-	if err := encoder.enc.Encode(command); err != nil {
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	data := encoder.buf.Bytes()
+	data := encodeCommand(command)
 
 	c.persistMu.Lock()
 	defer c.persistMu.Unlock()
@@ -613,9 +600,54 @@ func (c *Collection) persistCommand(command *Command) error {
 		return fmt.Errorf("collection is closed")
 	}
 
-	if _, err := c.file.Write(data); err != nil {
+	if _, err := c.buffer.Write(data); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
 
+	if err := c.buffer.Flush(); err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+
 	return nil
+}
+
+func encodeCommand(command *Command) []byte {
+	payloadLen := len(command.Payload)
+	buf := make([]byte, 0, payloadLen+256)
+
+	buf = append(buf, '{')
+	buf = appendJSONFieldString(buf, "name", command.Name)
+	buf = append(buf, ',')
+	buf = appendJSONFieldString(buf, "uuid", command.Uuid)
+	buf = append(buf, ',')
+	buf = appendJSONFieldInt(buf, "timestamp", command.Timestamp)
+	buf = append(buf, ',')
+	buf = appendJSONFieldInt(buf, "start_byte", command.StartByte)
+	buf = append(buf, ',')
+	buf = append(buf, '"', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '"', ':')
+	if payloadLen > 0 {
+		buf = append(buf, command.Payload...)
+	} else {
+		buf = append(buf, 'n', 'u', 'l', 'l')
+	}
+	buf = append(buf, '}')
+	buf = append(buf, '\n')
+
+	return buf
+}
+
+func appendJSONFieldString(dst []byte, key, value string) []byte {
+	dst = append(dst, '"')
+	dst = append(dst, key...)
+	dst = append(dst, '"', ':')
+	dst = strconv.AppendQuote(dst, value)
+	return dst
+}
+
+func appendJSONFieldInt(dst []byte, key string, value int64) []byte {
+	dst = append(dst, '"')
+	dst = append(dst, key...)
+	dst = append(dst, '"', ':')
+	dst = strconv.AppendInt(dst, value, 10)
+	return dst
 }

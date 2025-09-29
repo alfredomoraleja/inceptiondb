@@ -10,7 +10,7 @@
 * Implementar edición de documentos (sólo front)
 * Implementar el botón de eliminar documentos por ID (sólo front)
 * Implementar vista tabular alterna para resultados (sólo front)
-* Implementar exportación de resultados a JSON (sólo front)
+* Implementar exportación de resultados a JSONL (sólo front)
 
 ## Next features
 

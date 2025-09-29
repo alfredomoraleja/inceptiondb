@@ -260,7 +260,7 @@
                         :disabled="!canExportResults"
                         @click="exportResults"
                       >
-                        Export JSON
+                        Export JSONL
                       </button>
                       <div class="inline-flex overflow-hidden rounded-md border border-slate-700" role="group" aria-label="Select results layout">
                         <button
@@ -1006,7 +1006,6 @@
 
           const exportResults = () => {
             if (!selectedCollection.value || !canExportResults.value) return;
-            const rows = queryRows.value.map((row) => sanitizeRowForExport(row));
             const mapValueForExport = lastQueryDetails.value;
             const queryMeta = {
               filter: lastQueryDetails.filter,
@@ -1035,12 +1034,15 @@
             if (lastQueryDetails.elapsedMs !== null && lastQueryDetails.elapsedMs !== undefined) {
               metadata.stats.elapsedMs = lastQueryDetails.elapsedMs;
             }
-            const payload = {
-              metadata,
-              results: rows,
-            };
-            const jsonText = JSON.stringify(payload, (_, value) => (typeof value === 'bigint' ? value.toString() : value), 2);
-            const blob = new Blob([jsonText], { type: 'application/json' });
+            const replacer = (_, value) => (typeof value === 'bigint' ? value.toString() : value);
+            const newline = '\n';
+            const blobParts = [];
+            blobParts.push(`${JSON.stringify({ type: 'metadata', data: metadata }, replacer)}${newline}`);
+            queryRows.value.forEach((row) => {
+              const sanitized = sanitizeRowForExport(row);
+              blobParts.push(`${JSON.stringify({ type: 'document', data: sanitized }, replacer)}${newline}`);
+            });
+            const blob = new Blob(blobParts, { type: 'application/x-ndjson' });
             const url = URL.createObjectURL(blob);
             const baseName = (selectedCollection.value.name || 'collection')
               .toLowerCase()
@@ -1049,7 +1051,7 @@
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
             const link = document.createElement('a');
             link.href = url;
-            link.download = `${baseName}-results-${timestamp}.json`;
+            link.download = `${baseName}-results-${timestamp}.jsonl`;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);

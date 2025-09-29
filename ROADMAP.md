@@ -6,10 +6,10 @@
 * Añadir un indicador de estado de conexión con el backend (sólo front)
 * Implementar gestión de índices (sólo front)
 * Traducir toda la interfaz a inglés americano (sólo front)
+* Implementar edición de items (sólo front)
 
 ## Next features
 
-* Implementar edición de items (sólo front)
 * Mejorar la paginación (ver los campos skip y limit pero añadir botones de flechas next previous) (sólo front)
 * Implementar un log con el histórico de llamadas (sólo front)
 * Implementar modo claro/ocuro automático (sólo front)
@@ -18,6 +18,9 @@
 * Implementar vista tabular alterna para resultados (sólo front)
 * Añadir buscador de colecciones (sólo front)
 * Implementar ayuda contextual para filtros (sólo front)
+* Implementar eliminación masiva mediante filtros (sólo front)
+* Añadir control para saltar a una página concreta en los resultados (sólo front)
+* Añadir acción para copiar el JSON del documento al portapapeles (sólo front)
 
 ## Will not do these features
 

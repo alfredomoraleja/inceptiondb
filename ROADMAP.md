@@ -10,9 +10,13 @@
 * Implementar edición de documentos (sólo front)
 * Implementar el botón de eliminar documentos por ID (sólo front)
 * Implementar vista tabular alterna para resultados (sólo front)
+* Implementar exportación de resultados a JSON (sólo front)
 
 ## Next features
 
+* Implementar selección múltiple y eliminación en lote de documentos desde los resultados (sólo front)
+* Habilitar copiado al portapapeles del JSON de cada documento en los resultados (sólo front)
+* Añadir atajo de teclado (Ctrl+Enter) para ejecutar consultas rápidamente (sólo front)
 * Implementar buscador rápido por ID de documento en la vista principal (sólo front)
 * Añadir notificaciones emergentes para operaciones CRUD exitosas o fallidas (sólo front)
 * Añadir validación visual inmediata para filtros e inserciones JSON (sólo front)
@@ -20,7 +24,6 @@
 * Mejorar la paginación (ver los campos skip y limit pero añadir botones de flechas next previous) (sólo front)
 * Implementar modo claro/ocuro automático (sólo front)
 * Añadir un mensaje de bienvenida explicando las motivaciones del proyecto (sólo front)
-* Implementar exportación de resultados a JSON (sólo front)
 * Añadir buscador de colecciones (sólo front)
 * Implementar ayuda contextual para filtros (sólo front)
 * Añadir botón para restablecer filtros y paginación rápidamente (sólo front)

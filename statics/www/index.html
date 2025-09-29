@@ -253,25 +253,35 @@
                       <p class="text-sm font-semibold text-slate-200">Results</p>
                       <p class="text-xs text-slate-400">Switch between JSON cards and a table layout to review your documents.</p>
                     </div>
-                    <div class="inline-flex overflow-hidden rounded-md border border-slate-700" role="group" aria-label="Select results layout">
+                    <div class="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        class="px-3 py-1.5 text-xs font-semibold transition"
-                        :class="resultsViewMode === 'cards' ? 'bg-slate-800 text-slate-100' : 'bg-slate-900 text-slate-400 hover:text-slate-200'"
-                        :aria-pressed="resultsViewMode === 'cards'"
-                        @click="selectResultsView('cards')"
+                        class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                        :disabled="!canExportResults"
+                        @click="exportResults"
                       >
-                        JSON cards
+                        Export JSON
                       </button>
-                      <button
-                        type="button"
-                        class="border-l border-slate-700 px-3 py-1.5 text-xs font-semibold transition"
-                        :class="resultsViewMode === 'table' ? 'bg-slate-800 text-slate-100' : 'bg-slate-900 text-slate-400 hover:text-slate-200'"
-                        :aria-pressed="resultsViewMode === 'table'"
-                        @click="selectResultsView('table')"
-                      >
-                        Table view
-                      </button>
+                      <div class="inline-flex overflow-hidden rounded-md border border-slate-700" role="group" aria-label="Select results layout">
+                        <button
+                          type="button"
+                          class="px-3 py-1.5 text-xs font-semibold transition"
+                          :class="resultsViewMode === 'cards' ? 'bg-slate-800 text-slate-100' : 'bg-slate-900 text-slate-400 hover:text-slate-200'"
+                          :aria-pressed="resultsViewMode === 'cards'"
+                          @click="selectResultsView('cards')"
+                        >
+                          JSON cards
+                        </button>
+                        <button
+                          type="button"
+                          class="border-l border-slate-700 px-3 py-1.5 text-xs font-semibold transition"
+                          :class="resultsViewMode === 'table' ? 'bg-slate-800 text-slate-100' : 'bg-slate-900 text-slate-400 hover:text-slate-200'"
+                          :aria-pressed="resultsViewMode === 'table'"
+                          @click="selectResultsView('table')"
+                        >
+                          Table view
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -723,6 +733,20 @@
           });
           const MAX_ACTIVITY_LOG_ENTRIES = 50;
           const activityLog = ref([]);
+          const lastQueryDetails = reactive({
+            filter: {},
+            rawFilterText: '',
+            index: '',
+            value: null,
+            from: null,
+            to: null,
+            reverse: false,
+            page: 1,
+            pageSize: Number(pageSize.value) || 0,
+            executedAt: null,
+            returned: 0,
+            elapsedMs: null,
+          });
 
           const timeFormatter = new Intl.DateTimeFormat('en-US', {
             hour: 'numeric',
@@ -808,6 +832,72 @@
             activityLog.value = [];
           };
 
+          const toPlainValue = (value) => {
+            if (value === null) return null;
+            const type = typeof value;
+            if (type === 'bigint') return value.toString();
+            if (type === 'number' || type === 'string' || type === 'boolean') {
+              return value;
+            }
+            if (value instanceof Date) {
+              return value.toISOString();
+            }
+            if (Array.isArray(value)) {
+              return value.map((item) => toPlainValue(item));
+            }
+            if (type === 'object') {
+              const output = {};
+              Object.keys(value).forEach((key) => {
+                const plain = toPlainValue(value[key]);
+                if (plain !== undefined) {
+                  output[key] = plain;
+                }
+              });
+              return output;
+            }
+            return value;
+          };
+
+          const sanitizeRowForExport = (row) => {
+            if (row && typeof row === 'object') {
+              if (Object.prototype.hasOwnProperty.call(row, '_raw')) {
+                const raw = row._raw;
+                if (typeof raw === 'string') {
+                  try {
+                    return JSON.parse(raw);
+                  } catch (err) {
+                    return raw;
+                  }
+                }
+                return toPlainValue(raw);
+              }
+              return toPlainValue(row);
+            }
+            return toPlainValue(row);
+          };
+
+          const updateLastQueryDetails = (payload) => {
+            const trimmedFilter = (filterText.value || '').trim();
+            lastQueryDetails.filter = toPlainValue(payload?.filter || {});
+            lastQueryDetails.rawFilterText = trimmedFilter || '{}';
+            lastQueryDetails.index = payload?.index || '';
+            lastQueryDetails.value = Object.prototype.hasOwnProperty.call(payload || {}, 'value') ? payload.value : null;
+            lastQueryDetails.from = payload?.from ? toPlainValue(payload.from) : null;
+            lastQueryDetails.to = payload?.to ? toPlainValue(payload.to) : null;
+            lastQueryDetails.reverse = !!(payload && payload.reverse);
+            lastQueryDetails.page = Number(page.value) || 1;
+            lastQueryDetails.pageSize = Number(pageSize.value) || 0;
+            lastQueryDetails.executedAt = null;
+            lastQueryDetails.returned = 0;
+            lastQueryDetails.elapsedMs = null;
+          };
+
+          const recordQuerySuccess = (rowsCount, elapsedMs) => {
+            lastQueryDetails.returned = typeof rowsCount === 'number' ? rowsCount : 0;
+            lastQueryDetails.elapsedMs = typeof elapsedMs === 'number' && !Number.isNaN(elapsedMs) ? elapsedMs : null;
+            lastQueryDetails.executedAt = new Date();
+          };
+
           const connectionStatusLabel = computed(() => {
             if (connectionStatus.state === 'online') return 'Connected';
             if (connectionStatus.state === 'degraded') return 'Degraded';
@@ -881,6 +971,8 @@
             return `Showing ${start}–${end}`;
           });
 
+          const canExportResults = computed(() => !queryLoading.value && Array.isArray(queryRows.value) && queryRows.value.length > 0);
+
           const tableColumns = computed(() => {
             const columns = new Set();
             queryRows.value.forEach((row) => {
@@ -910,6 +1002,58 @@
 
           const selectResultsView = (mode) => {
             resultsViewMode.value = mode === 'table' ? 'table' : 'cards';
+          };
+
+          const exportResults = () => {
+            if (!selectedCollection.value || !canExportResults.value) return;
+            const rows = queryRows.value.map((row) => sanitizeRowForExport(row));
+            const mapValueForExport = lastQueryDetails.value;
+            const queryMeta = {
+              filter: lastQueryDetails.filter,
+              rawFilter: lastQueryDetails.rawFilterText || undefined,
+              index: lastQueryDetails.index || undefined,
+              from: lastQueryDetails.from || undefined,
+              to: lastQueryDetails.to || undefined,
+              reverse: lastQueryDetails.reverse ? true : undefined,
+            };
+            if (mapValueForExport !== null && mapValueForExport !== '') {
+              queryMeta.value = mapValueForExport;
+            }
+            const metadata = {
+              collection: selectedCollection.value.name,
+              exportedAt: new Date().toISOString(),
+              page: lastQueryDetails.page,
+              pageSize: lastQueryDetails.pageSize,
+              query: queryMeta,
+              stats: {
+                returned: lastQueryDetails.returned,
+              },
+            };
+            if (lastQueryDetails.executedAt instanceof Date) {
+              metadata.executedAt = lastQueryDetails.executedAt.toISOString();
+            }
+            if (lastQueryDetails.elapsedMs !== null && lastQueryDetails.elapsedMs !== undefined) {
+              metadata.stats.elapsedMs = lastQueryDetails.elapsedMs;
+            }
+            const payload = {
+              metadata,
+              results: rows,
+            };
+            const jsonText = JSON.stringify(payload, (_, value) => (typeof value === 'bigint' ? value.toString() : value), 2);
+            const blob = new Blob([jsonText], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const baseName = (selectedCollection.value.name || 'collection')
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/^-+|-+$/g, '') || 'collection';
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `${baseName}-results-${timestamp}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
           };
 
           const toggleCreateForm = () => {
@@ -1536,6 +1680,7 @@
               }
               return;
             }
+            updateLastQueryDetails(payload);
             queryLoading.value = true;
             const started = performance.now();
             const url = `/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:find`;
@@ -1566,6 +1711,7 @@
               queryStats.returned = parsedRows.length;
               const elapsed = Math.round(performance.now() - started);
               queryStats.elapsed = `${elapsed} ms`;
+              recordQuerySuccess(parsedRows.length, elapsed);
               markConnectionOnline();
               completeActivityEntry(entry, {
                 detail: `Retrieved ${parsedRows.length} documents in ${elapsed} ms.`,
@@ -1825,6 +1971,7 @@
             queryError,
             queryStats,
             resultsViewMode,
+            canExportResults,
             selectedIndexName,
             activeIndex,
             mapValue,
@@ -1861,6 +2008,7 @@
             toggleIndexForm,
             selectCollection,
             runQuery,
+            exportResults,
             nextPage,
             prevPage,
             documentId,

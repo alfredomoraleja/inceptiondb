@@ -1,7 +1,6 @@
 package collection
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ import (
 type Collection struct {
 	Filename  string // Just informative...
 	file      *os.File
-	buffer    *bufio.Writer
 	Rows      []*Row
 	rowsMutex *sync.Mutex
 	persistMu *sync.Mutex
@@ -139,11 +137,6 @@ func OpenCollection(filename string) (*Collection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
-
-	// allocate a buffered writer large enough to hold multiple commands before
-	// flushing to the operating system. This amortizes syscalls during bursts of
-	// inserts while still allowing explicit flushes on close.
-	collection.buffer = bufio.NewWriterSize(collection.file, 512*1024)
 
 	return collection, nil
 }
@@ -520,17 +513,11 @@ func (c *Collection) Close() error {
 	defer c.persistMu.Unlock()
 
 	var closeErr error
-	if c.buffer != nil {
-		if err := c.buffer.Flush(); err != nil {
-			closeErr = err
-		}
-	}
 	if c.file != nil {
 		closeErr = c.file.Close()
 	}
 
 	c.file = nil
-	c.buffer = nil
 
 	return closeErr
 }
@@ -591,29 +578,47 @@ func (c *Collection) persistCommand(command *Command) error {
 		return fmt.Errorf("collection is closed")
 	}
 
-	data := encodeCommand(command)
+	dataPtr := commandBufferPool.Get().(*[]byte)
+	buf := (*dataPtr)[:0]
+	buf = encodeCommand(buf, command)
 
 	c.persistMu.Lock()
 	defer c.persistMu.Unlock()
 
 	if c.file == nil {
+		commandBufferPool.Put(dataPtr)
 		return fmt.Errorf("collection is closed")
 	}
 
-	if _, err := c.buffer.Write(data); err != nil {
+	if n, err := c.file.Write(buf); err != nil {
+		commandBufferPool.Put(dataPtr)
 		return fmt.Errorf("write: %w", err)
+	} else if n != len(buf) {
+		commandBufferPool.Put(dataPtr)
+		return io.ErrShortWrite
 	}
 
-	if err := c.buffer.Flush(); err != nil {
-		return fmt.Errorf("flush: %w", err)
-	}
+	*dataPtr = buf[:0]
+	commandBufferPool.Put(dataPtr)
 
 	return nil
 }
 
-func encodeCommand(command *Command) []byte {
+var commandBufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, 1024)
+		return &buf
+	},
+}
+
+func encodeCommand(dst []byte, command *Command) []byte {
 	payloadLen := len(command.Payload)
-	buf := make([]byte, 0, payloadLen+256)
+	buf := dst
+	if cap(buf) < payloadLen+256 {
+		buf = make([]byte, 0, payloadLen+256)
+	}
+
+	buf = buf[:0]
 
 	buf = append(buf, '{')
 	buf = appendJSONFieldString(buf, "name", command.Name)

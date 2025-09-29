@@ -261,21 +261,31 @@
                     >
                       <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
                         <span>Document #{{ offset + idx + 1 }}</span>
-                        <button
-                          v-if="canDeleteRow(row)"
-                          type="button"
-                          class="rounded-md border border-rose-500/40 bg-rose-600/20 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-600/30 transition"
-                          @click="deleteRow(row)"
-                        >
-                          Delete
-                        </button>
+                        <div class="flex items-center gap-2">
+                          <button
+                            v-if="canEditRow(row)"
+                            type="button"
+                            class="rounded-md border border-sky-500/40 bg-sky-600/20 px-2 py-1 text-xs font-semibold text-sky-200 hover:bg-sky-600/30 transition"
+                            @click="editRow(row)"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            v-if="canDeleteRow(row)"
+                            type="button"
+                            class="rounded-md border border-rose-500/40 bg-rose-600/20 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-600/30 transition"
+                            @click="deleteRow(row)"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
                       <pre class="whitespace-pre-wrap break-words text-sm text-slate-200 font-mono">{{ formatDocument(row) }}</pre>
                       <p v-if="!canDeleteRow(row) && activeIndex && activeIndex.type === 'map'" class="mt-3 text-xs text-slate-500">
-                        The document does not contain the "{{ activeIndex.field }}" field required for deletion.
+                        The document does not contain the "{{ activeIndex.field }}" field required for editing or deletion.
                       </p>
                       <p v-else-if="activeIndex && activeIndex.type !== 'map'" class="mt-3 text-xs text-slate-500">
-                        Select a "map" index to enable direct deletion.
+                        Select a "map" index to enable direct editing and deletion.
                       </p>
                     </div>
                   </div>
@@ -441,6 +451,59 @@
           </section>
         </div>
       </main>
+      <teleport to="body">
+        <div
+          v-if="editForm.open"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6"
+          @click.self="closeEditForm"
+        >
+          <div class="w-full max-w-2xl space-y-4 rounded-xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <h3 class="text-lg font-semibold text-slate-100">Edit document</h3>
+                <p class="text-xs text-slate-400" v-if="editForm.indexField">
+                  Reference: {{ editForm.indexField }} = {{ editForm.indexValue }}
+                </p>
+              </div>
+              <button
+                type="button"
+                class="text-slate-400 hover:text-slate-200"
+                aria-label="Close edit dialog"
+                @click="closeEditForm"
+              >
+                <span aria-hidden="true">&times;</span>
+              </button>
+            </div>
+            <p class="text-sm text-slate-400">
+              Update the JSON content below and save the changes. Removing a property requires setting it to <code>null</code>.
+            </p>
+            <textarea
+              v-model="editForm.payload"
+              rows="14"
+              class="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500"
+            ></textarea>
+            <p v-if="editForm.error" class="text-sm text-rose-400">{{ editForm.error }}</p>
+            <div class="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                class="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-semibold text-slate-200 hover:bg-slate-800 transition"
+                :disabled="editForm.saving"
+                @click="closeEditForm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-500 transition disabled:cursor-not-allowed disabled:opacity-60"
+                :disabled="editForm.saving"
+                @click="saveEdit"
+              >
+                {{ editForm.saving ? 'Saving…' : 'Save changes' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </teleport>
     </div>
 
     <script>
@@ -469,6 +532,16 @@
           const rangeFrom = reactive({});
           const rangeTo = reactive({});
           const insertForm = reactive({ payload: '{\n\n}', error: '', success: '' });
+          const editForm = reactive({
+            open: false,
+            payload: '',
+            error: '',
+            saving: false,
+            original: null,
+            indexName: '',
+            indexField: '',
+            indexValue: '',
+          });
           const createForm = reactive({ open: false, name: '', error: '' });
           const indexForm = reactive({
             open: false,
@@ -576,6 +649,79 @@
           };
 
           const isSelected = (name) => selectedCollectionName.value === name;
+
+          const cloneJsonValue = (value) => {
+            if (value === null || typeof value !== 'object') return value;
+            return JSON.parse(JSON.stringify(value));
+          };
+
+          const isPlainObject = (value) => Object.prototype.toString.call(value) === '[object Object]';
+
+          const deepEqual = (a, b) => {
+            if (a === b) return true;
+            if (typeof a !== typeof b) return false;
+            if (a === null || b === null) return a === b;
+            if (Array.isArray(a) && Array.isArray(b)) {
+              if (a.length !== b.length) return false;
+              for (let i = 0; i < a.length; i += 1) {
+                if (!deepEqual(a[i], b[i])) return false;
+              }
+              return true;
+            }
+            if (isPlainObject(a) && isPlainObject(b)) {
+              const keysA = Object.keys(a);
+              const keysB = Object.keys(b);
+              if (keysA.length !== keysB.length) return false;
+              for (const key of keysA) {
+                if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+                if (!deepEqual(a[key], b[key])) return false;
+              }
+              return true;
+            }
+            return false;
+          };
+
+          const buildMergePatchObject = (original, updated) => {
+            if (deepEqual(original, updated)) {
+              return undefined;
+            }
+            const originalIsObject = original !== null && typeof original === 'object' && !Array.isArray(original);
+            const updatedIsObject = updated !== null && typeof updated === 'object' && !Array.isArray(updated);
+            if (!originalIsObject || !updatedIsObject) {
+              return cloneJsonValue(updated);
+            }
+            const patch = {};
+            const keys = new Set([...Object.keys(original || {}), ...Object.keys(updated || {})]);
+            keys.forEach((key) => {
+              if (!Object.prototype.hasOwnProperty.call(updated, key)) {
+                patch[key] = null;
+                return;
+              }
+              const valuePatch = buildMergePatchObject(original ? original[key] : undefined, updated[key]);
+              if (valuePatch !== undefined) {
+                patch[key] = valuePatch;
+              }
+            });
+            if (Object.keys(patch).length === 0) {
+              return undefined;
+            }
+            return patch;
+          };
+
+          const resetEditForm = () => {
+            editForm.open = false;
+            editForm.payload = '';
+            editForm.error = '';
+            editForm.saving = false;
+            editForm.original = null;
+            editForm.indexName = '';
+            editForm.indexField = '';
+            editForm.indexValue = '';
+          };
+
+          const closeEditForm = () => {
+            resetEditForm();
+          };
 
           const toggleCreateForm = () => {
             createForm.open = !createForm.open;
@@ -790,6 +936,7 @@
             mapValue.value = '';
             reverse.value = false;
             resetRangeFields();
+            resetEditForm();
           });
 
           watch(selectedCollection, async (collection) => {
@@ -809,6 +956,7 @@
             resetIndexForm();
             indexMessages.error = '';
             indexMessages.success = '';
+            resetEditForm();
             if (collection) {
               await loadIndexes();
               await runQuery();
@@ -983,12 +1131,43 @@
             runQuery();
           });
 
+          const canEditRow = (row) => {
+            if (!row || typeof row !== 'object' || row === null || Object.prototype.hasOwnProperty.call(row, '_raw')) {
+              return false;
+            }
+            const index = activeIndex.value;
+            if (!index || index.type !== 'map' || !index.field) return false;
+            const value = row[index.field];
+            return typeof value === 'string';
+          };
+
           const canDeleteRow = (row) => {
             const index = activeIndex.value;
             if (!index || index.type !== 'map') return false;
             const field = index.field;
             if (!field) return false;
             return Object.prototype.hasOwnProperty.call(row, field);
+          };
+
+          const editRow = (row) => {
+            if (!canEditRow(row)) {
+              const index = activeIndex.value;
+              if (!index || index.type !== 'map') {
+                queryError.value = 'Select a "map" index to edit documents.';
+              } else {
+                queryError.value = `The document does not contain a valid "${index.field}" value to edit.`;
+              }
+              return;
+            }
+            const index = activeIndex.value;
+            editForm.original = cloneJsonValue(row);
+            editForm.payload = JSON.stringify(row, null, 2);
+            editForm.error = '';
+            editForm.saving = false;
+            editForm.indexName = index.name;
+            editForm.indexField = index.field;
+            editForm.indexValue = row[index.field];
+            editForm.open = true;
           };
 
           const deleteRow = async (row) => {
@@ -1013,6 +1192,56 @@
             } catch (error) {
               queryError.value = error?.response?.data?.error || 'Failed to delete the document.';
               handleRequestError(error);
+            }
+          };
+
+          const saveEdit = async () => {
+            if (!editForm.open) return;
+            editForm.error = '';
+            if (!selectedCollection.value) {
+              editForm.error = 'Select a collection before saving.';
+              return;
+            }
+            let updated;
+            try {
+              updated = JSON.parse(editForm.payload);
+            } catch (err) {
+              editForm.error = 'Invalid JSON: ' + err.message;
+              return;
+            }
+            if (updated === null || typeof updated !== 'object' || Array.isArray(updated)) {
+              editForm.error = 'The document must be a JSON object.';
+              return;
+            }
+            if (!editForm.original) {
+              editForm.error = 'The original document is no longer available.';
+              return;
+            }
+            const patch = buildMergePatchObject(editForm.original, updated);
+            if (patch === undefined) {
+              editForm.error = 'No changes detected.';
+              return;
+            }
+            if (!editForm.indexName) {
+              editForm.error = 'The index reference is no longer available.';
+              return;
+            }
+            editForm.saving = true;
+            try {
+              await axios.post(`/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:patch`, {
+                index: editForm.indexName,
+                value: editForm.indexValue,
+                patch,
+              });
+              markConnectionOnline();
+              closeEditForm();
+              await runQuery();
+              await loadCollections();
+            } catch (error) {
+              editForm.error = error?.response?.data?.error || 'Failed to update the document.';
+              handleRequestError(error);
+            } finally {
+              editForm.saving = false;
             }
           };
 
@@ -1128,6 +1357,7 @@
             indexForm,
             indexMessages,
             insertForm,
+            editForm,
             createForm,
             connectionStatus,
             connectionStatusLabel,
@@ -1159,6 +1389,10 @@
             dropCollection,
             deleteRow,
             canDeleteRow,
+            canEditRow,
+            editRow,
+            saveEdit,
+            closeEditForm,
             formatDocument,
             refreshConnectionStatus,
           };

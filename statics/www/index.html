@@ -281,14 +281,8 @@
                         </div>
                       </div>
                       <pre class="whitespace-pre-wrap break-words text-sm text-slate-200 font-mono">{{ formatDocument(row) }}</pre>
-                      <p
-                        v-if="!(canEditRow(row) || canDeleteRow(row)) && activeIndex && activeIndex.type === 'map'"
-                        class="mt-3 text-xs text-slate-500"
-                      >
-                        The document does not contain the "{{ activeIndex.field }}" field required for editing or deletion.
-                      </p>
-                      <p v-else-if="activeIndex && activeIndex.type !== 'map'" class="mt-3 text-xs text-slate-500">
-                        Select a "map" index to enable editing and deletion.
+                      <p v-if="missingDocumentKeyField(row)" class="mt-3 text-xs text-slate-500">
+                        The document does not contain the "{{ documentKeyFieldName }}" field required for editing or deletion.
                       </p>
                     </div>
                   </div>
@@ -515,7 +509,7 @@
           <div class="space-y-1">
             <h3 class="text-lg font-semibold text-slate-100">Edit document</h3>
             <p class="text-xs text-slate-400">
-              Updating document where {{ editDialog.indexField }} = {{ editDialog.valueLabel }} in collection
+              Updating document where {{ editDialog.keyField }} = {{ editDialog.valueLabel }} in collection
               "{{ editDialog.collectionName }}".
             </p>
           </div>
@@ -562,6 +556,7 @@
 
     <script>
       const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount } = Vue;
+      const DOCUMENT_KEY_FIELD = 'id';
 
       createApp({
         setup() {
@@ -611,9 +606,8 @@
             text: '',
             error: '',
             saving: false,
-            indexField: '',
-            indexName: '',
-            indexValue: null,
+            keyField: '',
+            keyValue: null,
             valueLabel: '',
             original: null,
             collectionName: '',
@@ -799,6 +793,20 @@
               return String(value);
             }
           };
+
+          const isObjectRow = (row) => row && typeof row === 'object' && !Array.isArray(row);
+
+          const hasRawMarker = (row) => isObjectRow(row) && Object.prototype.hasOwnProperty.call(row, '_raw');
+
+          const documentHasKeyField = (row) =>
+            isObjectRow(row) &&
+            !hasRawMarker(row) &&
+            Object.prototype.hasOwnProperty.call(row, DOCUMENT_KEY_FIELD);
+
+          const missingDocumentKeyField = (row) =>
+            isObjectRow(row) &&
+            !hasRawMarker(row) &&
+            !Object.prototype.hasOwnProperty.call(row, DOCUMENT_KEY_FIELD);
 
           const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -1082,9 +1090,8 @@
             editDialog.text = '';
             editDialog.error = '';
             editDialog.saving = false;
-            editDialog.indexField = '';
-            editDialog.indexName = '';
-            editDialog.indexValue = null;
+            editDialog.keyField = '';
+            editDialog.keyValue = null;
             editDialog.valueLabel = '';
             editDialog.original = null;
             editDialog.collectionName = '';
@@ -1092,8 +1099,11 @@
 
           const openEditDialog = (row) => {
             if (!selectedCollection.value || !canEditRow(row)) return;
-            const index = activeIndex.value;
-            const value = row[index.field];
+            const value = row[DOCUMENT_KEY_FIELD];
+            if (value === undefined) {
+              editDialog.error = `The document is missing a value for "${DOCUMENT_KEY_FIELD}".`;
+              return;
+            }
             let originalCopy;
             try {
               originalCopy = JSON.parse(JSON.stringify(row));
@@ -1101,9 +1111,8 @@
               editDialog.error = 'Failed to prepare the document for editing.';
               return;
             }
-            editDialog.indexField = index.field;
-            editDialog.indexName = index.name;
-            editDialog.indexValue = value;
+            editDialog.keyField = DOCUMENT_KEY_FIELD;
+            editDialog.keyValue = value;
             editDialog.collectionName = selectedCollection.value.name;
             editDialog.valueLabel = formatValueLabel(value);
             editDialog.text = JSON.stringify(originalCopy, null, 2);
@@ -1141,30 +1150,31 @@
               editDialog.error = 'Select a collection before editing.';
               return;
             }
-            const indexName = editDialog.indexName;
-            const indexField = editDialog.indexField;
-            const indexValue = editDialog.indexValue;
-            if (!indexName || indexValue === undefined) {
-              editDialog.error = 'Index information is missing.';
+            const keyField = editDialog.keyField || DOCUMENT_KEY_FIELD;
+            const keyValue = editDialog.keyValue;
+            if (keyValue === undefined) {
+              editDialog.error = 'Document identifier is missing.';
               return;
             }
             const url = `/v1/collections/${encodeURIComponent(collectionName)}:patch`;
             editDialog.saving = true;
             const entry = createActivityEntry({
-              label: `Update document by ${indexField}`,
+              label: `Update document by ${keyField}`,
               method: 'POST',
               url,
               target: collectionName,
             });
             try {
               const resp = await axios.post(url, {
-                index: indexName,
-                value: indexValue,
+                filter: {
+                  [keyField]: keyValue,
+                },
+                limit: 1,
                 patch,
               });
               markConnectionOnline();
               completeActivityEntry(entry, {
-                detail: `Updated document where ${indexField} = ${editDialog.valueLabel}.`,
+                detail: `Updated document where ${keyField} = ${editDialog.valueLabel}.`,
                 statusCode: resp.status,
               });
               closeEditDialog();
@@ -1427,49 +1437,38 @@
             runQuery();
           });
 
-          const canEditRow = (row) => {
-            const index = activeIndex.value;
-            if (!index || index.type !== 'map' || !index.field) return false;
-            if (!row || typeof row !== 'object' || row === null) return false;
-            if (Object.prototype.hasOwnProperty.call(row, '_raw')) return false;
-            return Object.prototype.hasOwnProperty.call(row, index.field);
-          };
+          const canEditRow = (row) => documentHasKeyField(row);
 
-          const canDeleteRow = (row) => {
-            const index = activeIndex.value;
-            if (!index || index.type !== 'map' || !index.field) return false;
-            if (!row || typeof row !== 'object' || row === null) return false;
-            return Object.prototype.hasOwnProperty.call(row, index.field);
-          };
+          const canDeleteRow = (row) => documentHasKeyField(row);
 
           const deleteRow = async (row) => {
-            const index = activeIndex.value;
-            if (!selectedCollection.value || !index || index.type !== 'map' || !index.field) return;
-            const value = row[index.field];
+            if (!selectedCollection.value || !canDeleteRow(row)) return;
+            const value = row[DOCUMENT_KEY_FIELD];
             if (value === undefined) {
-              queryError.value = `The document does not contain the field "${index.field}".`;
+              queryError.value = `The document is missing a value for "${DOCUMENT_KEY_FIELD}".`;
               return;
             }
             const collectionName = selectedCollection.value.name;
             const valueLabel = formatValueLabel(value);
-            const ok = window.confirm(`Delete the document where ${index.field} = ${valueLabel}?`);
+            const ok = window.confirm(`Delete the document where ${DOCUMENT_KEY_FIELD} = ${valueLabel}?`);
             if (!ok) return;
             const url = `/v1/collections/${encodeURIComponent(collectionName)}:remove`;
             const entry = createActivityEntry({
-              label: `Delete document by ${index.field}`,
+              label: `Delete document by ${DOCUMENT_KEY_FIELD}`,
               method: 'POST',
               url,
               target: collectionName,
             });
             try {
               const resp = await axios.post(url, {
-                index: index.name,
-                value,
+                filter: {
+                  [DOCUMENT_KEY_FIELD]: value,
+                },
                 limit: 1,
               });
               markConnectionOnline();
               completeActivityEntry(entry, {
-                detail: `Deleted document where ${index.field} = ${valueLabel}.`,
+                detail: `Deleted document where ${DOCUMENT_KEY_FIELD} = ${valueLabel}.`,
                 statusCode: resp.status,
               });
               if (editDialog.open) {
@@ -1668,6 +1667,8 @@
             submitEdit,
             canDeleteRow,
             canEditRow,
+            missingDocumentKeyField,
+            documentKeyFieldName: DOCUMENT_KEY_FIELD,
             formatDocument,
             refreshConnectionStatus,
             formatActivityTime,

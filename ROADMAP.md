@@ -7,10 +7,10 @@
 * Implementar gestión de índices (sólo front)
 * Traducir toda la interfaz a inglés americano (sólo front)
 * Implementar un log con el histórico de llamadas (sólo front)
+* Implementar edición y borrado de documentos (sólo front)
 
 ## Next features
 
-* Implementar edición de items (sólo front)
 * Mejorar la paginación (ver los campos skip y limit pero añadir botones de flechas next previous) (sólo front)
 * Implementar modo claro/ocuro automático (sólo front)
 * Añadir un mensaje de bienvenida explicando las motivaciones del proyecto (sólo front)
@@ -21,6 +21,9 @@
 * Añadir botón para restablecer filtros y paginación rápidamente (sólo front)
 * Mejorar los mensajes de confirmación para operaciones destructivas con más contexto (sólo front)
 * Implementar panel de métricas de rendimiento de consultas en la sesión (sólo front)
+* Añadir vista detallada expandible para cada documento (sólo front)
+* Permitir ordenar resultados basados en el índice seleccionado (sólo front)
+* Implementar notificaciones de éxito y error no intrusivas (sólo front)
 
 ## Will not do these features
 

@@ -259,23 +259,30 @@
                       :key="idx"
                       class="rounded-lg border border-slate-800 bg-slate-950 p-4"
                     >
-                      <div class="flex items-center justify-between text-xs text-slate-500 mb-3">
+                      <div class="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 mb-3">
                         <span>Document #{{ offset + idx + 1 }}</span>
-                        <button
-                          v-if="canDeleteRow(row)"
-                          type="button"
-                          class="rounded-md border border-rose-500/40 bg-rose-600/20 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-600/30 transition"
-                          @click="deleteRow(row)"
-                        >
-                          Delete
-                        </button>
+                        <div class="flex flex-wrap gap-2">
+                          <button
+                            v-if="canEditRow(row)"
+                            type="button"
+                            class="rounded-md border border-sky-500/40 bg-sky-600/20 px-2 py-1 text-xs font-semibold text-sky-200 hover:bg-sky-600/30 transition"
+                            @click="openEditForm(row)"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            v-if="canDeleteRow(row)"
+                            type="button"
+                            class="rounded-md border border-rose-500/40 bg-rose-600/20 px-2 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-600/30 transition"
+                            @click="deleteRow(row)"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
                       <pre class="whitespace-pre-wrap break-words text-sm text-slate-200 font-mono">{{ formatDocument(row) }}</pre>
-                      <p v-if="!canDeleteRow(row) && activeIndex && activeIndex.type === 'map'" class="mt-3 text-xs text-slate-500">
-                        The document does not contain the "{{ activeIndex.field }}" field required for deletion.
-                      </p>
-                      <p v-else-if="activeIndex && activeIndex.type !== 'map'" class="mt-3 text-xs text-slate-500">
-                        Select a "map" index to enable direct deletion.
+                      <p v-if="!canEditRow(row) && !canDeleteRow(row)" class="mt-3 text-xs text-slate-500">
+                        This document cannot be modified because it is not valid JSON or is missing the "id" field.
                       </p>
                     </div>
                   </div>
@@ -491,6 +498,57 @@
       </main>
     </div>
 
+    <div
+      v-if="editForm.open"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div class="w-full max-w-3xl rounded-xl border border-slate-800 bg-slate-900 shadow-2xl">
+        <div class="flex items-center justify-between border-b border-slate-800 px-5 py-4">
+          <h3 class="text-lg font-semibold text-slate-100">Edit document</h3>
+          <button
+            type="button"
+            class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition"
+            @click="closeEditForm"
+          >
+            Close
+          </button>
+        </div>
+        <form class="space-y-4 px-5 py-4" @submit.prevent="submitEditForm">
+          <p class="text-sm text-slate-400">Document ID: <span class="font-semibold text-slate-200">{{ editForm.documentId }}</span></p>
+          <div>
+            <label for="edit-document" class="block text-xs uppercase tracking-wide text-slate-400">Document (JSON)</label>
+            <textarea
+              id="edit-document"
+              v-model="editForm.payload"
+              rows="12"
+              class="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-mono text-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              placeholder='{"id": 123, "name": "Updated"}'
+            ></textarea>
+          </div>
+          <div class="flex flex-wrap justify-end gap-2">
+            <button
+              type="button"
+              class="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition"
+              @click="closeEditForm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white hover:bg-sky-500 transition disabled:cursor-not-allowed disabled:opacity-60"
+              :disabled="editForm.submitting"
+            >
+              {{ editForm.submitting ? 'Saving…' : 'Save changes' }}
+            </button>
+          </div>
+          <p v-if="editForm.error" class="text-sm text-rose-400">{{ editForm.error }}</p>
+          <p v-else-if="editForm.success" class="text-sm text-emerald-400">{{ editForm.success }}</p>
+        </form>
+      </div>
+    </div>
+
     <script>
       const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount } = Vue;
 
@@ -517,6 +575,14 @@
           const rangeFrom = reactive({});
           const rangeTo = reactive({});
           const insertForm = reactive({ payload: '{\n\n}', error: '', success: '' });
+          const editForm = reactive({
+            open: false,
+            documentId: null,
+            payload: '',
+            error: '',
+            success: '',
+            submitting: false,
+          });
           const createForm = reactive({ open: false, name: '', error: '' });
           const indexForm = reactive({
             open: false,
@@ -1162,40 +1228,43 @@
             runQuery();
           });
 
-          const canDeleteRow = (row) => {
-            const index = activeIndex.value;
-            if (!index || index.type !== 'map') return false;
-            const field = index.field;
-            if (!field) return false;
-            return Object.prototype.hasOwnProperty.call(row, field);
+          const getDocumentId = (row) => {
+            if (!row || typeof row !== 'object' || Array.isArray(row)) return undefined;
+            if (Object.prototype.hasOwnProperty.call(row, '_raw')) return undefined;
+            const id = row.id;
+            if (id === undefined || id === null) return undefined;
+            return id;
           };
 
+          const canEditRow = (row) => getDocumentId(row) !== undefined;
+
+          const canDeleteRow = (row) => getDocumentId(row) !== undefined;
+
           const deleteRow = async (row) => {
-            const index = activeIndex.value;
-            if (!selectedCollection.value || !index || index.type !== 'map' || !index.field) return;
-            const value = row[index.field];
-            if (value === undefined) {
-              queryError.value = `The document does not contain the field "${index.field}".`;
+            if (!selectedCollection.value) return;
+            queryError.value = '';
+            const id = getDocumentId(row);
+            if (id === undefined) {
+              queryError.value = 'The document does not contain the field "id".';
               return;
             }
-            const ok = window.confirm(`Delete the document where ${index.field} = ${value}?`);
+            const ok = window.confirm(`Delete the document with id "${id}"? This action cannot be undone.`);
             if (!ok) return;
             const url = `/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:remove`;
             const entry = createActivityEntry({
-              label: `Delete document by ${index.field}`,
+              label: `Delete document ${id}`,
               method: 'POST',
               url,
               target: selectedCollection.value.name,
             });
             try {
               const resp = await axios.post(url, {
-                mode: 'unique',
-                field: index.field,
-                value,
+                filter: { id },
+                limit: 1,
               });
               markConnectionOnline();
               completeActivityEntry(entry, {
-                detail: `Deleted document where ${index.field} = ${value}.`,
+                detail: `Deleted document with id ${id}.`,
                 statusCode: resp.status,
               });
               await runQuery();
@@ -1204,6 +1273,79 @@
               queryError.value = error?.response?.data?.error || 'Failed to delete the document.';
               failActivityEntry(entry, error, { fallback: 'Failed to delete the document.' });
               handleRequestError(error);
+            }
+          };
+
+          const openEditForm = (row) => {
+            if (!selectedCollection.value) return;
+            const id = getDocumentId(row);
+            if (id === undefined) return;
+            editForm.open = true;
+            editForm.documentId = id;
+            editForm.payload = JSON.stringify(row, null, 2);
+            editForm.error = '';
+            editForm.success = '';
+          };
+
+          const closeEditForm = () => {
+            editForm.open = false;
+            editForm.documentId = null;
+            editForm.payload = '';
+            editForm.error = '';
+            editForm.success = '';
+            editForm.submitting = false;
+          };
+
+          const submitEditForm = async () => {
+            if (!selectedCollection.value || !editForm.open) return;
+            editForm.error = '';
+            editForm.success = '';
+            let parsed;
+            try {
+              parsed = JSON.parse(editForm.payload);
+            } catch (error) {
+              editForm.error = 'The document must be valid JSON.';
+              return;
+            }
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              editForm.error = 'The document must be a JSON object.';
+              return;
+            }
+            const currentId = editForm.documentId;
+            const nextId = parsed.id ?? currentId;
+            if (nextId === undefined || nextId === null) {
+              editForm.error = 'The document must include an "id" field.';
+              return;
+            }
+            const url = `/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:patch`;
+            const entry = createActivityEntry({
+              label: `Update document ${currentId}`,
+              method: 'POST',
+              url,
+              target: selectedCollection.value.name,
+            });
+            editForm.submitting = true;
+            try {
+              const resp = await axios.post(url, {
+                filter: { id: currentId },
+                patch: parsed,
+              });
+              markConnectionOnline();
+              completeActivityEntry(entry, {
+                detail: `Updated document ${currentId}.`,
+                statusCode: resp.status,
+              });
+              editForm.documentId = nextId;
+              editForm.payload = JSON.stringify(parsed, null, 2);
+              editForm.success = 'Document updated successfully.';
+              await runQuery();
+              await loadCollections();
+            } catch (error) {
+              editForm.error = error?.response?.data?.error || 'Failed to update the document.';
+              failActivityEntry(entry, error, { fallback: 'Failed to update the document.' });
+              handleRequestError(error);
+            } finally {
+              editForm.submitting = false;
             }
           };
 
@@ -1354,6 +1496,7 @@
             indexForm,
             indexMessages,
             insertForm,
+            editForm,
             createForm,
             connectionStatus,
             activityLog,
@@ -1385,7 +1528,11 @@
             createCollection,
             dropCollection,
             deleteRow,
+            openEditForm,
+            closeEditForm,
+            submitEditForm,
             canDeleteRow,
+            canEditRow,
             formatDocument,
             refreshConnectionStatus,
             formatActivityTime,

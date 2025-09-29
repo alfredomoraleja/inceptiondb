@@ -7,10 +7,13 @@
 * Implementar gestión de índices (sólo front)
 * Traducir toda la interfaz a inglés americano (sólo front)
 * Implementar un log con el histórico de llamadas (sólo front)
+* Implementar edición y borrado de documentos (sólo front)
 
 ## Next features
 
-* Implementar edición de items (sólo front)
+* Añadir validación interactiva del JSON en formularios (sólo front)
+* Incorporar controles de ordenación para los resultados de consultas (sólo front)
+* Añadir atajos de teclado para ejecutar consultas y limpiar filtros (sólo front)
 * Mejorar la paginación (ver los campos skip y limit pero añadir botones de flechas next previous) (sólo front)
 * Implementar modo claro/ocuro automático (sólo front)
 * Añadir un mensaje de bienvenida explicando las motivaciones del proyecto (sólo front)

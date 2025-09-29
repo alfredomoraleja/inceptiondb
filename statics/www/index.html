@@ -550,7 +550,7 @@
     </div>
 
     <script>
-      const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount } = Vue;
+      const { createApp, ref, reactive, computed, watch, onMounted, onBeforeUnmount, toRaw } = Vue;
 
       createApp({
         setup() {
@@ -648,6 +648,47 @@
             const statusCode = error?.response?.status;
             const detail = error?.response?.data?.error || error?.message || fallback || 'Request failed.';
             completeActivityEntry(entry, { status: 'error', detail, statusCode });
+          };
+
+          const unwrapForSerialization = (value, seen = new WeakSet()) => {
+            if (typeof value === 'bigint') {
+              return value.toString();
+            }
+            if (Array.isArray(value)) {
+              return value.map((item) => unwrapForSerialization(item, seen));
+            }
+            if (value && typeof value === 'object') {
+              const rawValue = toRaw(value);
+              if (seen.has(rawValue)) {
+                return '[Circular]';
+              }
+              seen.add(rawValue);
+              if (Array.isArray(rawValue)) {
+                return rawValue.map((item) => unwrapForSerialization(item, seen));
+              }
+              if (Object.prototype.toString.call(rawValue) !== '[object Object]') {
+                return rawValue;
+              }
+              const output = {};
+              Object.keys(rawValue).forEach((key) => {
+                output[key] = unwrapForSerialization(rawValue[key], seen);
+              });
+              return output;
+            }
+            return value;
+          };
+
+          const safeStringifyDocument = (value) => {
+            try {
+              const serializable = unwrapForSerialization(value);
+              const json = JSON.stringify(serializable, null, 2);
+              // Ensure the resulting string contains valid JSON before returning it.
+              JSON.parse(json);
+              return json;
+            } catch (error) {
+              console.warn('Failed to stringify document for UI rendering.', error);
+              return null;
+            }
           };
 
           const formatDuration = (ms) => {
@@ -1280,10 +1321,13 @@
             if (!selectedCollection.value) return;
             const id = getDocumentId(row);
             if (id === undefined) return;
+            const serialized = safeStringifyDocument(row);
             editForm.open = true;
             editForm.documentId = id;
-            editForm.payload = JSON.stringify(row, null, 2);
-            editForm.error = '';
+            editForm.payload = serialized ?? '';
+            editForm.error = serialized === null
+              ? 'This document contains data that cannot be edited as JSON.'
+              : '';
             editForm.success = '';
           };
 
@@ -1336,7 +1380,8 @@
                 statusCode: resp.status,
               });
               editForm.documentId = nextId;
-              editForm.payload = JSON.stringify(parsed, null, 2);
+              const updatedPayload = safeStringifyDocument(parsed);
+              editForm.payload = updatedPayload ?? editForm.payload;
               editForm.success = 'Document updated successfully.';
               await runQuery();
               await loadCollections();
@@ -1452,11 +1497,11 @@
             if (row && typeof row === 'object' && '_raw' in row) {
               return row._raw;
             }
-            try {
-              return JSON.stringify(row, null, 2);
-            } catch (err) {
-              return String(row);
+            const serialized = safeStringifyDocument(row);
+            if (serialized !== null) {
+              return serialized;
             }
+            return '[Unable to display document]';
           };
 
           onMounted(() => {

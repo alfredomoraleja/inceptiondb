@@ -58,8 +58,8 @@
     <script src="/lib/vue.global.prod.js"></script>
   </head>
   <body class="bg-slate-950 text-slate-100 min-h-screen">
-    <div id="app" class="min-h-screen flex">
-      <aside class="w-72 bg-slate-900 border-r border-slate-800 flex flex-col">
+    <div id="app" class="h-screen flex overflow-hidden">
+      <aside class="w-72 bg-slate-900 border-r border-slate-800 flex flex-col overflow-hidden">
         <div class="px-6 py-5 border-b border-slate-800">
           <div class="flex items-center justify-between">
             <h1 class="text-xl font-semibold tracking-wide">InceptionDB</h1>
@@ -130,7 +130,7 @@
             <p v-if="createForm.error" class="text-sm text-rose-400">{{ createForm.error }}</p>
           </form>
         </div>
-        <div class="flex-1 overflow-y-auto">
+        <div class="flex-1 overflow-y-auto min-h-0">
           <div v-if="collectionsLoading" class="px-6 py-4 text-sm text-slate-400">Loading collections…</div>
           <div v-else-if="collectionsError" class="px-6 py-4 text-sm text-rose-400">{{ collectionsError }}</div>
           <nav v-else class="py-2">
@@ -156,7 +156,7 @@
         </div>
       </aside>
 
-      <main class="flex-1">
+      <main class="flex-1 overflow-y-auto min-h-0">
         <div v-if="!selectedCollection" class="flex h-full flex-col items-center justify-center text-center gap-3 px-6">
           <h2 class="text-2xl font-semibold text-slate-200">Welcome to InceptionDB</h2>
           <p class="text-slate-400 max-w-md">Select or create a collection in the sidebar to start querying, inserting, or deleting documents.</p>

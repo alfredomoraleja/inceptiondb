@@ -841,11 +841,11 @@
         <div class="pointer-events-none absolute inset-0">
           <div
             ref="activityDetailCard"
-            class="pointer-events-auto absolute right-24 w-80 max-w-[90vw] -translate-y-1/2 transform rounded-xl border border-slate-800 bg-slate-950/95 p-5 shadow-2xl"
+            class="pointer-events-auto absolute w-80 max-w-[90vw] -translate-y-1/2 transform rounded-xl border border-slate-800 bg-slate-950/95 p-5 shadow-2xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="activity-detail-title"
-            :style="{ top: `${activityDetailPosition}px` }"
+            :style="{ top: `${activityDetailPosition}px`, left: `${activityDetailLeft}px` }"
           >
           <div class="flex items-start justify-between gap-3">
             <div class="space-y-1">
@@ -959,7 +959,8 @@
           const selectedActivityEntry = ref(null);
           const activityDetailCard = ref(null);
           const activityDetailPosition = ref(window.innerHeight ? window.innerHeight / 2 : 0);
-          const activityDetailAnchor = reactive({ top: 0, height: 0 });
+          const activityDetailLeft = ref(window.innerWidth ? window.innerWidth / 2 : 0);
+          const activityDetailAnchor = reactive({ top: 0, height: 0, left: 0, width: 0 });
           const exportState = reactive({
             running: false,
             progress: '',
@@ -1182,22 +1183,38 @@
 
           const updateActivityDetailPosition = () => {
             const viewportHeight = window.innerHeight || 0;
+            const viewportWidth = window.innerWidth || 0;
             const cardEl = activityDetailCard.value;
             const cardHeight = cardEl ? cardEl.offsetHeight : 0;
+            const cardWidth = cardEl ? cardEl.offsetWidth : 0;
+            const estimatedWidth = cardWidth || 320;
             const halfCard = cardHeight ? cardHeight / 2 : 0;
             const margin = 16;
+            const tooltipGap = 12;
             const anchorCenter = activityDetailAnchor.height
               ? activityDetailAnchor.top + activityDetailAnchor.height / 2
               : viewportHeight / 2;
 
             if (!viewportHeight) {
               activityDetailPosition.value = anchorCenter;
+            } else {
+              const minTop = margin + halfCard;
+              const maxTop = viewportHeight - margin - halfCard;
+              activityDetailPosition.value = clamp(anchorCenter, minTop, maxTop);
+            }
+
+            const fallbackLeft = viewportWidth ? viewportWidth - margin : anchorCenter;
+            const anchorLeft = activityDetailAnchor.left || fallbackLeft;
+            const baseLeft = anchorLeft - tooltipGap - estimatedWidth;
+
+            if (!viewportWidth) {
+              activityDetailLeft.value = baseLeft;
               return;
             }
 
-            const minTop = margin + halfCard;
-            const maxTop = viewportHeight - margin - halfCard;
-            activityDetailPosition.value = clamp(anchorCenter, minTop, maxTop);
+            const minLeft = margin;
+            const maxLeft = viewportWidth - margin - estimatedWidth;
+            activityDetailLeft.value = clamp(baseLeft, minLeft, maxLeft);
           };
 
           const openActivityDetail = (entry, event) => {
@@ -1213,9 +1230,13 @@
               const rect = event.currentTarget.getBoundingClientRect();
               activityDetailAnchor.top = rect.top;
               activityDetailAnchor.height = rect.height;
+              activityDetailAnchor.left = rect.left;
+              activityDetailAnchor.width = rect.width;
             } else {
               activityDetailAnchor.top = window.innerHeight ? window.innerHeight / 2 : 0;
               activityDetailAnchor.height = 0;
+              activityDetailAnchor.left = window.innerWidth ? window.innerWidth - 16 : 0;
+              activityDetailAnchor.width = 0;
             }
 
             nextTick(updateActivityDetailPosition);
@@ -1226,6 +1247,8 @@
             selectedActivityEntry.value = null;
             activityDetailAnchor.top = 0;
             activityDetailAnchor.height = 0;
+            activityDetailAnchor.left = 0;
+            activityDetailAnchor.width = 0;
           };
 
           const clearActivityLog = () => {
@@ -2690,6 +2713,7 @@
             activityMarkerTitle,
             activityDetailCard,
             activityDetailPosition,
+            activityDetailLeft,
             openActivityDetail,
             closeActivityDetail,
           };

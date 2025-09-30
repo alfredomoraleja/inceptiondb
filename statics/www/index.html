@@ -8,6 +8,35 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%230f172a'/><text x='50' y='58' font-size='52' text-anchor='middle' fill='white'>IDB</text></svg>">
     <script src="/lib/axios.min.js"></script>
     <script src="/lib/vue.global.prod.js"></script>
+    <style>
+      .activity-drop-item {
+        transition: transform 0.3s ease-out;
+      }
+
+      .activity-drop-enter-active,
+      .activity-drop-leave-active {
+        transition: transform 0.45s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.45s ease-out;
+      }
+
+      .activity-drop-enter-from {
+        opacity: 0;
+        transform: translateY(-70px) scale(0.6);
+      }
+
+      .activity-drop-enter-to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+
+      .activity-drop-leave-to {
+        opacity: 0;
+        transform: translateY(-30px) scale(0.8);
+      }
+
+      .activity-drop-move {
+        transition: transform 0.3s ease-out;
+      }
+    </style>
   </head>
   <body class="bg-slate-950 text-slate-100 min-h-screen">
     <div id="app" class="min-h-screen flex">
@@ -714,57 +743,95 @@
                 </ul>
               </div>
 
-              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner space-y-4">
-                <div class="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 class="text-sm font-semibold text-slate-200 uppercase tracking-wide">Activity log</h3>
-                    <p class="mt-1 text-xs text-slate-400">Latest API calls for this session.</p>
-                  </div>
-                  <button
-                    type="button"
-                    class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition disabled:opacity-50 disabled:cursor-not-allowed"
-                    :disabled="activityLog.length === 0"
-                    @click="clearActivityLog"
-                  >
-                    Clear log
-                  </button>
-                </div>
-                <div v-if="activityLog.length === 0" class="text-sm text-slate-400">No activity recorded yet.</div>
-                <ul v-else class="space-y-3">
-                  <li
-                    v-for="entry in activityLog"
-                    :key="entry.id"
-                    class="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-2"
-                  >
-                    <div class="flex items-start justify-between gap-3">
-                      <div class="space-y-1 min-w-0">
-                        <p class="text-sm font-semibold text-slate-200 flex flex-wrap items-baseline gap-2">
-                          <span class="text-[11px] uppercase tracking-wide text-slate-500">{{ entry.method }}</span>
-                          <span class="truncate">{{ entry.label }}</span>
-                        </p>
-                        <p class="text-xs text-slate-500 break-all">{{ entry.url }}</p>
-                        <p v-if="entry.target" class="text-[11px] uppercase tracking-wide text-slate-500">Target: {{ entry.target }}</p>
-                      </div>
-                      <span
-                        class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
-                        :class="activityStatusBadgeClass(entry.status)"
-                      >
-                        {{ activityStatusLabel(entry.status) }}
-                      </span>
-                    </div>
-                    <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-                      <span>{{ formatActivityTime(entry.startedAt) }}</span>
-                      <span v-if="entry.durationMs !== null">{{ formatDuration(entry.durationMs) }}</span>
-                    </div>
-                    <p class="text-xs text-slate-300">{{ entry.detail }}</p>
-                    <p v-if="entry.statusCode" class="text-[11px] uppercase tracking-wide text-slate-500">HTTP {{ entry.statusCode }}</p>
-                  </li>
-                </ul>
-              </div>
             </div>
           </section>
         </div>
       </main>
+
+      <transition-group
+        v-if="activityLog.length"
+        name="activity-drop"
+        tag="div"
+        class="pointer-events-none fixed right-6 top-6 z-40 flex flex-col items-end gap-2"
+      >
+        <div
+          v-for="entry in activityLog"
+          :key="entry.id"
+          class="activity-drop-item group relative pointer-events-auto"
+        >
+          <button
+            type="button"
+            class="block h-2 w-2 rounded-full transform transition-transform duration-200 hover:scale-125 focus:outline-none focus:ring-2 focus:ring-sky-400/40"
+            :class="activityStatusDotClass(entry.status)"
+            @click="showCurlPreview(entry)"
+          >
+            <span class="sr-only">Show cURL command for {{ entry.label }}</span>
+          </button>
+          <div
+            class="pointer-events-none absolute right-full top-1/2 z-40 hidden -translate-y-1/2 transform pr-4 group-hover:flex"
+          >
+            <div class="flex items-start gap-3 text-left">
+              <span class="mt-0.5 block h-2 w-2 rounded-full bg-white shadow-lg"></span>
+              <div class="flex min-w-[13rem] max-w-[16rem] flex-col gap-1 text-[11px] text-slate-200 drop-shadow">
+                <p class="font-semibold uppercase tracking-wide text-slate-400">{{ entry.method }} · {{ activityStatusLabel(entry.status) }}</p>
+                <p class="text-xs font-semibold text-slate-100">{{ entry.label }}</p>
+                <p class="text-slate-300 break-words">{{ entry.url }}</p>
+                <p v-if="entry.target" class="uppercase tracking-wide text-slate-400">Target: {{ entry.target }}</p>
+                <p v-if="entry.detail" class="text-slate-200/90">{{ entry.detail }}</p>
+                <p v-if="entry.statusCode" class="uppercase tracking-wide text-slate-400">HTTP {{ entry.statusCode }}</p>
+                <div class="flex flex-wrap items-center gap-3 uppercase tracking-wide text-slate-400">
+                  <span>{{ formatActivityTime(entry.startedAt) }}</span>
+                  <span v-if="entry.durationMs !== null">{{ formatDuration(entry.durationMs) }}</span>
+                </div>
+                <p class="uppercase tracking-wide text-slate-400">Click to view cURL command.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button
+          key="activity-clear-button"
+          type="button"
+          class="pointer-events-auto rounded-full border border-slate-700 bg-slate-900/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-300 shadow hover:bg-slate-800"
+          @click="clearActivityLog"
+        >
+          Clear
+        </button>
+      </transition-group>
+
+      <div
+        v-if="curlPreview.visible"
+        class="fixed bottom-6 right-6 z-50 max-w-lg rounded-xl border border-slate-800 bg-slate-900/95 p-5 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="curl-preview-title"
+      >
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p id="curl-preview-title" class="text-sm font-semibold text-slate-200">{{ curlPreview.label }}</p>
+            <p class="mt-1 text-xs text-slate-400" v-if="curlPreview.canCopy">Copy and run this command to reproduce the request.</p>
+            <p class="mt-1 text-xs text-slate-400" v-else>{{ curlPreview.helper }}</p>
+          </div>
+          <button
+            type="button"
+            class="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800"
+            @click="closeCurlPreview"
+          >
+            Close
+          </button>
+        </div>
+        <pre class="mt-3 max-h-48 overflow-y-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-100 whitespace-pre-wrap break-all">{{ curlPreview.command }}</pre>
+        <div class="mt-3 flex items-center justify-between gap-3">
+          <p class="text-[11px] uppercase tracking-wide text-slate-500">{{ curlPreview.status }}</p>
+          <button
+            type="button"
+            class="rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 text-xs font-semibold text-sky-200 transition hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            :disabled="!curlPreview.canCopy"
+            @click="copyCurlCommand"
+          >
+            Copy command
+          </button>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -839,7 +906,89 @@
             hour12: true,
           });
 
-          const createActivityEntry = ({ label, method, url, target }) => {
+          const cloneRequestData = (payload) => {
+            if (payload === undefined || payload === null) {
+              return payload;
+            }
+            try {
+              return JSON.parse(JSON.stringify(payload));
+            } catch (error) {
+              return payload;
+            }
+          };
+
+          const SUPPORTED_CURL_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+
+          const buildCurlCommand = ({ method, url, requestData }) => {
+            if (!method || !url) return '';
+            const upperMethod = String(method).toUpperCase();
+            if (!SUPPORTED_CURL_METHODS.has(upperMethod)) return '';
+            if (url.startsWith('local://')) return '';
+            const fullUrl = /^https?:\/\//i.test(url) ? url : `${window.location.origin}${url}`;
+            let command = `curl -X ${upperMethod} '${fullUrl}'`;
+            if (upperMethod === 'GET') {
+              return command;
+            }
+            if (requestData === undefined || requestData === null) {
+              return command;
+            }
+            let jsonPayload = '';
+            try {
+              jsonPayload = JSON.stringify(requestData);
+            } catch (error) {
+              return command;
+            }
+            if (!jsonPayload) {
+              return command;
+            }
+            const escaped = jsonPayload.replace(/'/g, `'"'"'`);
+            command += ` -H 'Content-Type: application/json' -d '${escaped}'`;
+            return command;
+          };
+
+          const curlPreview = reactive({
+            visible: false,
+            label: '',
+            command: '',
+            status: '',
+            helper: 'This entry does not generate an HTTP request.',
+            canCopy: false,
+          });
+
+          const showCurlPreview = (entry) => {
+            if (!entry) return;
+            curlPreview.label = entry.label || 'Request details';
+            curlPreview.status = '';
+            const command = buildCurlCommand(entry);
+            if (command) {
+              curlPreview.command = command;
+              curlPreview.canCopy = true;
+              curlPreview.helper = 'Copy and run this command to reproduce the request.';
+            } else {
+              curlPreview.command = 'A cURL command is not available for this action.';
+              curlPreview.canCopy = false;
+              curlPreview.helper = 'This entry does not generate an HTTP request.';
+            }
+            curlPreview.visible = true;
+          };
+
+          const closeCurlPreview = () => {
+            curlPreview.visible = false;
+            curlPreview.command = '';
+            curlPreview.status = '';
+          };
+
+          const copyCurlCommand = async () => {
+            if (!curlPreview.visible || !curlPreview.canCopy) return;
+            try {
+              await navigator.clipboard.writeText(curlPreview.command);
+              curlPreview.status = 'Command copied to clipboard.';
+            } catch (error) {
+              curlPreview.status = 'Copy failed. Select the command manually.';
+            }
+          };
+
+          const createActivityEntry = ({ label, method, url, target, data }) => {
             const entry = {
               id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               label,
@@ -852,6 +1001,7 @@
               startedAt: new Date(),
               finishedAt: null,
               durationMs: null,
+              requestData: cloneRequestData(data),
             };
             activityLog.value.unshift(entry);
             if (activityLog.value.length > MAX_ACTIVITY_LOG_ENTRIES) {
@@ -1007,6 +1157,17 @@
             }
           };
 
+          const activityStatusDotClass = (status) => {
+            switch (status) {
+              case 'success':
+                return 'bg-emerald-400';
+              case 'error':
+                return 'bg-rose-400';
+              default:
+                return 'bg-sky-400';
+            }
+          };
+
           const activityStatusBadgeClass = (status) => {
             switch (status) {
               case 'success':
@@ -1020,6 +1181,7 @@
 
           const clearActivityLog = () => {
             activityLog.value = [];
+            closeCurlPreview();
           };
 
           const connectionStatusLabel = computed(() => {
@@ -1349,18 +1511,20 @@
             }
             state.saving = true;
             const url = `/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:patch`;
+            const requestPayload = {
+              filter: { id: row.id },
+              patch: preparedPatch,
+              limit: 1,
+            };
             const entry = createActivityEntry({
               label: `Edit document ${id}`,
               method: 'POST',
               url,
               target: selectedCollection.value.name,
+              data: requestPayload,
             });
             try {
-              const resp = await axios.post(url, {
-                filter: { id: row.id },
-                patch: preparedPatch,
-                limit: 1,
-              });
+              const resp = await axios.post(url, requestPayload);
               markConnectionOnline();
               completeActivityEntry(entry, {
                 detail: `Document ${id} updated successfully.`,
@@ -1424,6 +1588,7 @@
               method: 'POST',
               url,
               target: selectedCollection.value.name,
+              data: payload,
             });
             try {
               const resp = await axios.post(url, payload);
@@ -1454,14 +1619,16 @@
             const ok = window.confirm(confirmMessage);
             if (!ok) return;
             const url = `/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:dropIndex`;
+            const payload = { name: index.name };
             const entry = createActivityEntry({
               label: `Delete index ${index.name}`,
               method: 'POST',
               url,
               target: selectedCollection.value.name,
+              data: payload,
             });
             try {
-              const resp = await axios.post(url, { name: index.name });
+              const resp = await axios.post(url, payload);
               markConnectionOnline();
               if (selectedIndexName.value === index.name) {
                 selectedIndexName.value = '';
@@ -1780,6 +1947,7 @@
               method: 'POST',
               url,
               target: selectedCollection.value.name,
+              data: payload,
             });
             try {
               const resp = await axios({
@@ -1887,16 +2055,18 @@
             }
 
             const url = `/v1/collections/${encodeURIComponent(collectionName)}:find`;
+            const basePayload = JSON.parse(JSON.stringify(lastQueryParameters.payload || {}));
             const entry = createActivityEntry({
               label: 'Export all results (JSONL)',
               method: 'POST',
               url,
               target: collectionName,
+              data: basePayload,
             });
             exportState.progress = 'Preparing export for all matching documents…';
 
             try {
-              const template = JSON.parse(JSON.stringify(lastQueryParameters.payload || {}));
+              const template = JSON.parse(JSON.stringify(basePayload));
               const chunks = [];
               let totalExported = 0;
               let batches = 0;
@@ -2013,17 +2183,19 @@
             const ok = window.confirm(`Delete the document with id ${id}?`);
             if (!ok) return;
             const url = `/v1/collections/${encodeURIComponent(selectedCollection.value.name)}:remove`;
+            const payload = {
+              filter: { id: row.id },
+              limit: 1,
+            };
             const entry = createActivityEntry({
               label: `Delete document ${id}`,
               method: 'POST',
               url,
               target: selectedCollection.value.name,
+              data: payload,
             });
             try {
-              const resp = await axios.post(url, {
-                filter: { id: row.id },
-                limit: 1,
-              });
+              const resp = await axios.post(url, payload);
               markConnectionOnline();
               completeActivityEntry(entry, {
                 detail: `Deleted document with id ${id}.`,
@@ -2114,6 +2286,7 @@
               method: 'POST',
               url,
               target: selectedCollection.value.name,
+              data: payload,
             });
             try {
               const resp = await axios.post(url, payload);
@@ -2145,6 +2318,7 @@
               method: 'POST',
               url: '/v1/collections',
               target: name,
+              data: { name },
             });
             try {
               const resp = await axios.post('/v1/collections', { name });
@@ -2272,6 +2446,7 @@
             createForm,
             connectionStatus,
             activityLog,
+            curlPreview,
             exportState,
             connectionStatusLabel,
             connectionStatusDescription,
@@ -2319,8 +2494,12 @@
             formatActivityTime,
             formatDuration,
             activityStatusLabel,
+            activityStatusDotClass,
             activityStatusBadgeClass,
             clearActivityLog,
+            showCurlPreview,
+            closeCurlPreview,
+            copyCurlCommand,
           };
         },
       }).mount('#app');

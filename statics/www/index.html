@@ -8,6 +8,35 @@
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%230f172a'/><text x='50' y='58' font-size='52' text-anchor='middle' fill='white'>IDB</text></svg>">
     <script src="/lib/axios.min.js"></script>
     <script src="/lib/vue.global.prod.js"></script>
+    <style>
+      .activity-drop-item {
+        transition: transform 0.3s ease-out;
+      }
+
+      .activity-drop-enter-active,
+      .activity-drop-leave-active {
+        transition: transform 0.45s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.45s ease-out;
+      }
+
+      .activity-drop-enter-from {
+        opacity: 0;
+        transform: translateY(-70px) scale(0.6);
+      }
+
+      .activity-drop-enter-to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+
+      .activity-drop-leave-to {
+        opacity: 0;
+        transform: translateY(-30px) scale(0.8);
+      }
+
+      .activity-drop-move {
+        transition: transform 0.3s ease-out;
+      }
+    </style>
   </head>
   <body class="bg-slate-950 text-slate-100 min-h-screen">
     <div id="app" class="min-h-screen flex">
@@ -643,14 +672,16 @@
         </div>
       </main>
 
-      <div
+      <transition-group
         v-if="activityLog.length"
+        name="activity-drop"
+        tag="div"
         class="pointer-events-none fixed right-6 top-6 z-40 flex flex-col items-end gap-2"
       >
         <div
           v-for="entry in activityLog"
           :key="entry.id"
-          class="group relative pointer-events-auto"
+          class="activity-drop-item group relative pointer-events-auto"
         >
           <button
             type="button"
@@ -679,13 +710,14 @@
           </div>
         </div>
         <button
+          key="activity-clear-button"
           type="button"
           class="pointer-events-auto rounded-full border border-slate-700 bg-slate-900/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-wide text-slate-300 shadow hover:bg-slate-800"
           @click="clearActivityLog"
         >
           Clear
         </button>
-      </div>
+      </transition-group>
 
       <div
         v-if="curlPreview.visible"

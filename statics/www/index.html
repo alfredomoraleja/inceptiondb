@@ -1022,20 +1022,58 @@
           role="list"
           aria-label="Recent requests"
         >
-          <button
+          <div
             v-for="entry in activityLog"
             :key="entry.id"
-            type="button"
-            class="activity-marker transition-transform duration-150 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-slate-900 hover:scale-125"
-            :class="[
-              activityMarkerClass(entry),
-              activityDetailOpen && selectedActivityEntry && selectedActivityEntry.id === entry.id ? 'activity-marker-selected' : ''
-            ]"
-            :title="activityMarkerTitle(entry)"
-            :aria-label="activityMarkerTitle(entry)"
+            class="group relative"
             role="listitem"
-            @click="openActivityDetail(entry, $event)"
-          ></button>
+          >
+            <button
+              type="button"
+              class="activity-marker transition-transform duration-150 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-slate-900 hover:scale-125"
+              :class="[
+                activityMarkerClass(entry),
+                activityDetailOpen && selectedActivityEntry && selectedActivityEntry.id === entry.id ? 'activity-marker-selected' : ''
+              ]"
+              :aria-label="activityMarkerTitle(entry)"
+              :aria-describedby="activityMarkerTooltipId(entry)"
+              @click="openActivityDetail(entry, $event)"
+            ></button>
+            <div
+              v-if="entry"
+              :id="activityMarkerTooltipId(entry)"
+              role="tooltip"
+              class="pointer-events-none absolute right-full mr-3 flex w-64 max-w-xs -translate-y-1 flex-col rounded-lg border border-slate-800 bg-slate-950/95 px-3 py-2 text-left text-xs shadow-xl opacity-0 transition duration-150 invisible z-50 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100"
+            >
+              <p class="text-xs font-semibold text-slate-100">
+                {{ entry.label || 'Request' }}
+              </p>
+              <p
+                v-if="entry.method || entry.status || entry.statusCode"
+                class="mt-1 text-[11px] uppercase tracking-wide text-slate-400"
+              >
+                <span v-if="entry.method">{{ String(entry.method).toUpperCase() }}</span>
+                <span v-if="entry.method && (entry.status || entry.statusCode)" class="mx-1 text-slate-600">•</span>
+                <span v-if="entry.status">{{ activityStatusLabel(entry.status) }}</span>
+                <span v-if="entry.statusCode" class="ml-1">HTTP {{ entry.statusCode }}</span>
+              </p>
+              <p v-if="entry.url" class="mt-1 break-all text-[11px] text-slate-500">{{ entry.url }}</p>
+              <p v-if="entry.target" class="mt-1 text-[10px] uppercase tracking-wide text-slate-500">
+                Target: {{ entry.target }}
+              </p>
+              <p
+                v-if="entry.startedAt || typeof entry.durationMs === 'number'"
+                class="mt-1 text-[10px] text-slate-500"
+              >
+                <span v-if="entry.startedAt">{{ formatActivityTime(entry.startedAt) }}</span>
+                <span
+                  v-if="entry.startedAt && typeof entry.durationMs === 'number'"
+                  class="mx-1 text-slate-700"
+                >•</span>
+                <span v-if="typeof entry.durationMs === 'number'">Duration {{ formatDuration(entry.durationMs) }}</span>
+              </p>
+            </div>
+          </div>
         </div>
       </div>
       <div v-if="activityDetailOpen && selectedActivityEntry" class="fixed inset-0 z-50">
@@ -1667,6 +1705,11 @@
             if (entry.method) segments.push(String(entry.method).toUpperCase());
             if (entry.label) segments.push(entry.label);
             return segments.join(' · ') || 'Request';
+          };
+
+          const activityMarkerTooltipId = (entry) => {
+            if (!entry || entry.id === undefined || entry.id === null) return undefined;
+            return `activity-tooltip-${entry.id}`;
           };
 
           const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
@@ -3227,6 +3270,7 @@
             clearActivityLog,
             activityMarkerClass,
             activityMarkerTitle,
+            activityMarkerTooltipId,
             activityDetailCard,
             activityDetailPosition,
             openActivityDetail,

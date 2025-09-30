@@ -1198,47 +1198,87 @@
           };
 
           const createJsonlStream = (file, { signal, onBytes } = {}) => {
+            const reader = file.stream().getReader();
+            let firstChunk = true;
             let aborted = false;
+            let controllerRef = null;
+            let abortListener = null;
+
+            const removeAbortListener = () => {
+              if (signal && abortListener) {
+                signal.removeEventListener('abort', abortListener);
+                abortListener = null;
+              }
+            };
+
+            const releaseReader = () => {
+              try {
+                reader.releaseLock();
+              } catch (err) {
+                // no-op if already released
+              }
+            };
+
+            const handleAbort = () => {
+              if (aborted) return;
+              aborted = true;
+              removeAbortListener();
+              reader.cancel('aborted').catch(() => {}).finally(() => {
+                releaseReader();
+              });
+              if (controllerRef) {
+                controllerRef.error(new DOMException('Aborted', 'AbortError'));
+              }
+            };
+
             return new ReadableStream({
-              async start(controller) {
-                const reader = file.stream().getReader();
-                let firstChunk = true;
-                const abort = () => {
-                  aborted = true;
-                  reader.cancel('aborted');
-                  controller.error(new DOMException('Aborted', 'AbortError'));
-                };
+              start(controller) {
+                controllerRef = controller;
                 if (signal) {
                   if (signal.aborted) {
-                    abort();
+                    handleAbort();
                     return;
                   }
-                  signal.addEventListener('abort', abort);
+                  abortListener = handleAbort;
+                  signal.addEventListener('abort', abortListener);
                 }
+              },
+              async pull(controller) {
                 try {
-                  while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    if (value) {
-                      if (onBytes) onBytes(value.byteLength);
-                      let chunk = value;
-                      if (firstChunk && value.byteLength >= 3 && value[0] === 0xef && value[1] === 0xbb && value[2] === 0xbf) {
-                        chunk = value.slice(3);
-                      }
-                      firstChunk = false;
-                      if (chunk.byteLength > 0) {
-                        controller.enqueue(chunk);
-                      }
+                  const { value, done } = await reader.read();
+                  if (done) {
+                    removeAbortListener();
+                    releaseReader();
+                    controller.close();
+                    return;
+                  }
+                  if (value) {
+                    if (onBytes) onBytes(value.byteLength);
+                    let chunk = value;
+                    if (firstChunk && value.byteLength >= 3 && value[0] === 0xef && value[1] === 0xbb && value[2] === 0xbf) {
+                      chunk = value.slice(3);
+                    }
+                    firstChunk = false;
+                    if (chunk.byteLength > 0) {
+                      controller.enqueue(chunk);
                     }
                   }
-                  controller.close();
                 } catch (err) {
+                  removeAbortListener();
+                  releaseReader();
                   if (!aborted) {
                     controller.error(err);
                   }
-                } finally {
-                  if (signal) signal.removeEventListener('abort', abort);
-                  reader.releaseLock();
+                }
+              },
+              cancel(reason) {
+                removeAbortListener();
+                if (!aborted) {
+                  reader.cancel(reason).catch(() => {}).finally(() => {
+                    releaseReader();
+                  });
+                } else {
+                  releaseReader();
                 }
               },
             });
@@ -1280,100 +1320,175 @@
           const createCsvToJsonlStream = (file, { signal, onBytes, delimiter = ',' } = {}) => {
             const encoder = new TextEncoder();
             const decoder = new TextDecoder();
+            const reader = file.stream().getReader();
+            const pendingChunks = [];
+            let buffer = '';
+            let headers = null;
+            let processedLines = 0;
+            let doneReading = false;
             let aborted = false;
+            let controllerRef = null;
+            let abortListener = null;
+
+            const removeAbortListener = () => {
+              if (signal && abortListener) {
+                signal.removeEventListener('abort', abortListener);
+                abortListener = null;
+              }
+            };
+
+            const releaseReader = () => {
+              try {
+                reader.releaseLock();
+              } catch (err) {
+                // ignore if already released
+              }
+            };
+
+            const enqueueRecord = (record) => {
+              pendingChunks.push(encoder.encode(`${JSON.stringify(record)}\n`));
+            };
+
+            const processLine = (rawLine) => {
+              const currentLine = processedLines + 1;
+              const line = rawLine.replace(/\r$/, '');
+              try {
+                if (headers === null) {
+                  const cleaned = line.replace(/^\ufeff/, '');
+                  const parsedHeaders = parseCsvLine(cleaned, delimiter).map((name, index) => {
+                    const trimmed = name.trim();
+                    return trimmed || `field_${index + 1}`;
+                  });
+                  if (parsedHeaders.length === 0) {
+                    const headerError = new Error('CSV header row is empty.');
+                    headerError.isCsvError = true;
+                    throw headerError;
+                  }
+                  headers = parsedHeaders;
+                  processedLines = currentLine;
+                  return;
+                }
+                if (!line.trim()) {
+                  processedLines = currentLine;
+                  return;
+                }
+                const values = parseCsvLine(line, delimiter);
+                const record = {};
+                const length = Math.max(headers.length, values.length);
+                for (let index = 0; index < length; index += 1) {
+                  const key = headers[index] || `field_${index + 1}`;
+                  record[key] = values[index] !== undefined ? values[index] : '';
+                }
+                enqueueRecord(record);
+                processedLines = currentLine;
+              } catch (err) {
+                const message = err?.message || String(err);
+                const parseError = new Error(`CSV parsing error on line ${currentLine}: ${message}`);
+                parseError.isCsvError = true;
+                throw parseError;
+              }
+            };
+
+            const flushPending = (controller) => {
+              if (pendingChunks.length > 0) {
+                controller.enqueue(pendingChunks.shift());
+                return true;
+              }
+              return false;
+            };
+
+            const handleAbort = () => {
+              if (aborted) return;
+              aborted = true;
+              pendingChunks.length = 0;
+              removeAbortListener();
+              reader
+                .cancel('aborted')
+                .catch(() => {})
+                .finally(() => {
+                  releaseReader();
+                });
+              if (controllerRef) {
+                controllerRef.error(new DOMException('Aborted', 'AbortError'));
+              }
+            };
+
             return new ReadableStream({
-              async start(controller) {
-                const reader = file.stream().getReader();
-                let buffer = '';
-                let headers = null;
-                let processedLines = 0;
-                const abort = () => {
-                  aborted = true;
-                  reader.cancel('aborted');
-                  controller.error(new DOMException('Aborted', 'AbortError'));
-                };
+              start(controller) {
+                controllerRef = controller;
                 if (signal) {
                   if (signal.aborted) {
-                    abort();
+                    handleAbort();
                     return;
                   }
-                  signal.addEventListener('abort', abort);
+                  abortListener = handleAbort;
+                  signal.addEventListener('abort', abortListener);
                 }
-
-                const processLine = (rawLine) => {
-                  const currentLine = processedLines + 1;
-                  const line = rawLine.replace(/\r$/, '');
-                  try {
-                    if (headers === null) {
-                      const cleaned = line.replace(/^\ufeff/, '');
-                      const parsedHeaders = parseCsvLine(cleaned, delimiter).map((name, index) => {
-                        const trimmed = name.trim();
-                        return trimmed || `field_${index + 1}`;
-                      });
-                      if (parsedHeaders.length === 0) {
-                        const headerError = new Error('CSV header row is empty.');
-                        headerError.isCsvError = true;
-                        throw headerError;
-                      }
-                      headers = parsedHeaders;
-                      processedLines = currentLine;
-                      return;
-                    }
-                    if (!line.trim()) {
-                      processedLines = currentLine;
-                      return;
-                    }
-                    const values = parseCsvLine(line, delimiter);
-                    const record = {};
-                    const length = Math.max(headers.length, values.length);
-                    for (let index = 0; index < length; index += 1) {
-                      const key = headers[index] || `field_${index + 1}`;
-                      record[key] = values[index] !== undefined ? values[index] : '';
-                    }
-                    controller.enqueue(encoder.encode(`${JSON.stringify(record)}\n`));
-                    processedLines = currentLine;
-                  } catch (err) {
-                    const message = err?.message || String(err);
-                    const parseError = new Error(`CSV parsing error on line ${currentLine}: ${message}`);
-                    parseError.isCsvError = true;
-                    throw parseError;
-                  }
-                };
-
+              },
+              async pull(controller) {
+                if (flushPending(controller)) {
+                  return;
+                }
                 try {
                   while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    if (value) {
-                      if (onBytes) onBytes(value.byteLength);
-                      buffer += decoder.decode(value, { stream: true });
-                      let newlineIndex = buffer.indexOf('\n');
-                      while (newlineIndex >= 0) {
+                    if (buffer) {
+                      const newlineIndex = buffer.indexOf('\n');
+                      if (newlineIndex >= 0) {
                         const line = buffer.slice(0, newlineIndex);
                         buffer = buffer.slice(newlineIndex + 1);
                         processLine(line);
-                        newlineIndex = buffer.indexOf('\n');
+                        if (flushPending(controller)) {
+                          return;
+                        }
+                        continue;
                       }
                     }
+                    if (doneReading) {
+                      if (buffer) {
+                        processLine(buffer);
+                        buffer = '';
+                        if (flushPending(controller)) {
+                          return;
+                        }
+                      }
+                      if (headers === null) {
+                        const emptyError = new Error('The CSV file is empty or missing a header row.');
+                        emptyError.isCsvError = true;
+                        removeAbortListener();
+                        releaseReader();
+                        controller.error(emptyError);
+                        return;
+                      }
+                      removeAbortListener();
+                      releaseReader();
+                      controller.close();
+                      return;
+                    }
+                    const { value, done } = await reader.read();
+                    if (done) {
+                      doneReading = true;
+                      buffer += decoder.decode();
+                    } else if (value) {
+                      if (onBytes) onBytes(value.byteLength);
+                      buffer += decoder.decode(value, { stream: true });
+                    }
                   }
-                  buffer += decoder.decode();
-                  if (buffer) {
-                    processLine(buffer);
-                    buffer = '';
-                  }
-                  if (headers === null) {
-                    const emptyError = new Error('The CSV file is empty or missing a header row.');
-                    emptyError.isCsvError = true;
-                    throw emptyError;
-                  }
-                  controller.close();
                 } catch (err) {
+                  removeAbortListener();
+                  releaseReader();
                   if (!aborted) {
                     controller.error(err);
                   }
-                } finally {
-                  if (signal) signal.removeEventListener('abort', abort);
-                  reader.releaseLock();
+                }
+              },
+              cancel(reason) {
+                removeAbortListener();
+                if (!aborted) {
+                  reader.cancel(reason).catch(() => {}).finally(() => {
+                    releaseReader();
+                  });
+                } else {
+                  releaseReader();
                 }
               },
             });

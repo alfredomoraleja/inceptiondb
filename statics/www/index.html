@@ -451,8 +451,8 @@
                             {{ editingDocuments[documentId(row)].success }}
                           </p>
                         </div>
-                        <pre class="whitespace-pre-wrap break-words text-sm text-slate-200 font-mono">{{ formatDocument(row) }}</pre>
-                        <p v-if="!canEditDocument(row)" class="mt-3 text-xs text-slate-500">
+                        <pre class="whitespace-pre-wrap break-words rounded-lg border border-slate-800/60 bg-slate-900/50 p-3 text-sm font-mono text-slate-200">{{ formatDocument(row) }}</pre>
+                        <p v-if="!canEditDocument(row)" class="text-xs text-slate-500">
                           The document must include an "id" field to enable editing or deletion.
                         </p>
                       </div>

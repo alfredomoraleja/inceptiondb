@@ -190,8 +190,8 @@
             </div>
           </header>
 
-          <section class="grid gap-6 lg:grid-cols-[2fr_1fr]">
-            <div class="space-y-6">
+          <section class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div class="space-y-6 min-w-0">
               <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner space-y-5">
                 <div>
                   <label for="filter" class="block text-xs uppercase tracking-wide text-slate-400">Filter (JSON)</label>
@@ -428,8 +428,8 @@
                         </p>
                       </div>
                     </div>
-                    <div v-else class="space-y-4">
-                      <div class="w-full overflow-x-auto">
+                    <div v-else class="space-y-4 min-w-0">
+                      <div class="w-full max-w-full overflow-x-auto">
                         <table class="min-w-full divide-y divide-slate-800 text-sm">
                           <thead class="bg-slate-950/40 text-slate-300">
                             <tr>
@@ -540,7 +540,7 @@
               </div>
             </div>
 
-            <div class="space-y-6">
+            <div class="space-y-6 min-w-0">
               <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner space-y-4">
                 <div class="flex items-start justify-between gap-3">
                   <div>

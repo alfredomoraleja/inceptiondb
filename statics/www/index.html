@@ -827,68 +827,71 @@
             :title="activityMarkerTitle(entry)"
             :aria-label="activityMarkerTitle(entry)"
             role="listitem"
-            @click="openActivityDetail(entry)"
+            @click="openActivityDetail(entry, $event)"
           ></button>
         </div>
       </div>
-      <div v-if="activityDetailOpen && selectedActivityEntry" class="fixed inset-0 z-50 flex items-center justify-center px-4">
+      <div v-if="activityDetailOpen && selectedActivityEntry" class="fixed inset-0 z-50">
         <button
           type="button"
-          class="absolute inset-0 cursor-default bg-slate-950/70 backdrop-blur-sm"
+          class="absolute inset-0 cursor-default bg-transparent"
           aria-label="Close request details"
           @click="closeActivityDetail"
         ></button>
-        <div
-          ref="activityDetailCard"
-          class="relative z-10 w-full max-w-md rounded-2xl border border-slate-800 bg-slate-950/95 p-6 shadow-2xl outline-none"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="activity-detail-title"
-          tabindex="-1"
-        >
-          <div class="flex items-start justify-between gap-3">
-            <div class="space-y-1">
-              <p id="activity-detail-title" class="text-sm font-semibold text-slate-100">{{ selectedActivityEntry.label || 'Request details' }}</p>
-              <p class="text-xs text-slate-400">
-                <span class="uppercase tracking-wide text-slate-300">{{ selectedActivityEntry.method }}</span>
-                <span class="mx-1 text-slate-600">•</span>
-                <span>{{ formatActivityTime(selectedActivityEntry.startedAt) }}</span>
-              </p>
+        <div class="pointer-events-none absolute inset-0">
+          <div
+            ref="activityDetailCard"
+            class="pointer-events-auto absolute w-80 max-w-[calc(100vw-32px)] rounded-2xl border border-slate-800 bg-slate-950/95 p-5 shadow-2xl outline-none"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="activity-detail-title"
+            tabindex="-1"
+            :style="activityDetailStyle"
+          >
+            <div class="flex items-start justify-between gap-3">
+              <div class="space-y-1">
+                <p id="activity-detail-title" class="text-sm font-semibold text-slate-100">{{ selectedActivityEntry.label || 'Request details' }}</p>
+                <p class="text-xs text-slate-400">
+                  <span class="uppercase tracking-wide text-slate-300">{{ selectedActivityEntry.method }}</span>
+                  <span class="mx-1 text-slate-600">•</span>
+                  <span>{{ formatActivityTime(selectedActivityEntry.startedAt) }}</span>
+                </p>
+              </div>
+              <span
+                class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
+                :class="activityStatusBadgeClass(selectedActivityEntry.status)"
+              >
+                {{ activityStatusLabel(selectedActivityEntry.status) }}
+              </span>
             </div>
-            <span
-              class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide"
-              :class="activityStatusBadgeClass(selectedActivityEntry.status)"
-            >
-              {{ activityStatusLabel(selectedActivityEntry.status) }}
-            </span>
-          </div>
-          <p class="mt-3 break-all text-xs text-slate-300">{{ selectedActivityEntry.url }}</p>
-          <p v-if="selectedActivityEntry.target" class="mt-2 text-[11px] uppercase tracking-wide text-slate-500">
-            Target: {{ selectedActivityEntry.target }}
-          </p>
-          <p v-if="selectedActivityEntry.statusCode" class="mt-2 text-[11px] uppercase tracking-wide text-slate-500">
-            HTTP {{ selectedActivityEntry.statusCode }}
-          </p>
-          <p class="mt-3 text-sm text-slate-200">{{ selectedActivityEntry.detail }}</p>
-          <div class="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
-            <span>Started {{ formatActivityTime(selectedActivityEntry.startedAt) }}</span>
-            <span v-if="selectedActivityEntry.durationMs !== null">Duration {{ formatDuration(selectedActivityEntry.durationMs) }}</span>
-          </div>
-          <div class="mt-4 flex flex-wrap justify-end gap-2">
-            <button
-              type="button"
-              class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition"
-              @click="clearActivityLog"
-            >
-              Clear log
-            </button>
-            <button
-              type="button"
-              class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition"
-              @click="closeActivityDetail"
-            >
-              Close
-            </button>
+            <p class="mt-3 break-all text-xs text-slate-300">{{ selectedActivityEntry.url }}</p>
+            <p v-if="selectedActivityEntry.target" class="mt-2 text-[11px] uppercase tracking-wide text-slate-500">
+              Target: {{ selectedActivityEntry.target }}
+            </p>
+            <p v-if="selectedActivityEntry.statusCode" class="mt-2 text-[11px] uppercase tracking-wide text-slate-500">
+              HTTP {{ selectedActivityEntry.statusCode }}
+            </p>
+            <p class="mt-3 text-sm text-slate-200">{{ selectedActivityEntry.detail }}</p>
+            <div class="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+              <span>Started {{ formatActivityTime(selectedActivityEntry.startedAt) }}</span>
+              <span v-if="selectedActivityEntry.durationMs !== null">Duration {{ formatDuration(selectedActivityEntry.durationMs) }}</span>
+            </div>
+            <div class="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition"
+                @click="clearActivityLog"
+              >
+                Clear log
+              </button>
+              <button
+                type="button"
+                class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition"
+                @click="closeActivityDetail"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -956,6 +959,10 @@
           const activityDetailOpen = ref(false);
           const selectedActivityEntry = ref(null);
           const activityDetailCard = ref(null);
+          const activityDetailAnchor = reactive({ top: 0, left: 0, width: 0, height: 0 });
+          const activityDetailStyle = reactive({ top: '0px', left: '0px' });
+          let activityDetailAnimation = null;
+          let activityDetailAnchorElement = null;
           const exportState = reactive({
             running: false,
             progress: '',
@@ -1173,7 +1180,77 @@
             return segments.join(' · ') || 'Request';
           };
 
-          const openActivityDetail = (entry) => {
+          const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+          const updateActivityDetailPosition = () => {
+            if (!activityDetailOpen.value) return;
+            const cardEl = activityDetailCard.value;
+            if (!cardEl) return;
+
+            if (activityDetailAnchorElement instanceof HTMLElement) {
+              const rect = activityDetailAnchorElement.getBoundingClientRect();
+              activityDetailAnchor.top = rect.top;
+              activityDetailAnchor.left = rect.left;
+              activityDetailAnchor.width = rect.width;
+              activityDetailAnchor.height = rect.height;
+            }
+
+            const viewportWidth = window.innerWidth || 0;
+            const viewportHeight = window.innerHeight || 0;
+            const margin = 16;
+            const gap = 12;
+            const cardWidth = cardEl.offsetWidth || 0;
+            const cardHeight = cardEl.offsetHeight || 0;
+            const anchor = activityDetailAnchor;
+            const hasAnchor = anchor.width > 0 || anchor.height > 0;
+
+            let top;
+            let left;
+
+            if (hasAnchor) {
+              const anchorCenterY = anchor.top + anchor.height / 2;
+              top = anchorCenterY - cardHeight / 2;
+              left = anchor.left - gap - cardWidth;
+              if (left < margin) {
+                left = anchor.left + anchor.width + gap;
+              }
+            } else {
+              top = viewportHeight ? (viewportHeight - cardHeight) / 2 : margin;
+              left = viewportWidth ? (viewportWidth - cardWidth) / 2 : margin;
+            }
+
+            if (viewportHeight) {
+              const minTop = margin;
+              const maxTop = Math.max(minTop, viewportHeight - margin - cardHeight);
+              top = clamp(top, minTop, maxTop);
+            } else {
+              top = Math.max(margin, top);
+            }
+
+            if (viewportWidth) {
+              const minLeft = margin;
+              const maxLeft = Math.max(minLeft, viewportWidth - margin - cardWidth);
+              left = clamp(left, minLeft, maxLeft);
+            } else {
+              left = Math.max(margin, left);
+            }
+
+            activityDetailStyle.top = `${Math.round(top)}px`;
+            activityDetailStyle.left = `${Math.round(left)}px`;
+          };
+
+          const scheduleActivityDetailUpdate = () => {
+            if (!activityDetailOpen.value) return;
+            if (activityDetailAnimation) {
+              cancelAnimationFrame(activityDetailAnimation);
+            }
+            activityDetailAnimation = requestAnimationFrame(() => {
+              activityDetailAnimation = null;
+              updateActivityDetailPosition();
+            });
+          };
+
+          const openActivityDetail = (entry, event) => {
             if (!entry) {
               closeActivityDetail();
               return;
@@ -1181,17 +1258,48 @@
 
             selectedActivityEntry.value = entry;
             activityDetailOpen.value = true;
+
+            if (event?.currentTarget instanceof HTMLElement) {
+              const rect = event.currentTarget.getBoundingClientRect();
+              activityDetailAnchor.top = rect.top;
+              activityDetailAnchor.left = rect.left;
+              activityDetailAnchor.width = rect.width;
+              activityDetailAnchor.height = rect.height;
+              activityDetailAnchorElement = event.currentTarget;
+            } else {
+              activityDetailAnchor.top = window.innerHeight ? window.innerHeight / 2 : 0;
+              activityDetailAnchor.left = window.innerWidth ? window.innerWidth / 2 : 0;
+              activityDetailAnchor.width = 0;
+              activityDetailAnchor.height = 0;
+              activityDetailAnchorElement = null;
+            }
+
+            activityDetailStyle.top = `${Math.round(activityDetailAnchor.top)}px`;
+            activityDetailStyle.left = `${Math.round(activityDetailAnchor.left)}px`;
+
             nextTick(() => {
               const card = activityDetailCard.value;
               if (card && typeof card.focus === 'function') {
                 card.focus();
               }
+              scheduleActivityDetailUpdate();
             });
           };
 
           const closeActivityDetail = () => {
             activityDetailOpen.value = false;
             selectedActivityEntry.value = null;
+            activityDetailAnchor.top = 0;
+            activityDetailAnchor.left = 0;
+            activityDetailAnchor.width = 0;
+            activityDetailAnchor.height = 0;
+            activityDetailStyle.top = '0px';
+            activityDetailStyle.left = '0px';
+            activityDetailAnchorElement = null;
+            if (activityDetailAnimation) {
+              cancelAnimationFrame(activityDetailAnimation);
+              activityDetailAnimation = null;
+            }
           };
 
           const clearActivityLog = () => {
@@ -1204,7 +1312,9 @@
             const stillExists = entries.some(entry => entry.id === selectedActivityEntry.value.id);
             if (!stillExists) {
               closeActivityDetail();
+              return;
             }
+            nextTick(() => scheduleActivityDetailUpdate());
           }, { deep: true });
 
           const handleKeydown = (event) => {
@@ -1212,6 +1322,16 @@
               event.preventDefault();
               closeActivityDetail();
             }
+          };
+
+          const handleResize = () => {
+            if (!activityDetailOpen.value) return;
+            scheduleActivityDetailUpdate();
+          };
+
+          const handleScroll = () => {
+            if (!activityDetailOpen.value) return;
+            scheduleActivityDetailUpdate();
           };
 
           const resetSizeMetrics = () => {
@@ -2545,6 +2665,8 @@
             loadCollections();
             statusPoller = window.setInterval(checkBackendStatus, 30000);
             window.addEventListener('keydown', handleKeydown);
+            window.addEventListener('resize', handleResize);
+            window.addEventListener('scroll', handleScroll, true);
           });
 
           onBeforeUnmount(() => {
@@ -2553,6 +2675,8 @@
               statusPoller = null;
             }
             window.removeEventListener('keydown', handleKeydown);
+            window.removeEventListener('resize', handleResize);
+            window.removeEventListener('scroll', handleScroll, true);
           });
 
           return {
@@ -2591,6 +2715,7 @@
             activityDetailOpen,
             selectedActivityEntry,
             activityDetailCard,
+            activityDetailStyle,
             exportState,
             sizeMetrics,
             sizeMetricsEntries,

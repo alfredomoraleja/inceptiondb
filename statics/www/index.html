@@ -827,27 +827,25 @@
             :title="activityMarkerTitle(entry)"
             :aria-label="activityMarkerTitle(entry)"
             role="listitem"
-            @click="openActivityDetail(entry, $event)"
+            @click="openActivityDetail(entry)"
           ></button>
         </div>
       </div>
-      <div v-if="activityDetailOpen && selectedActivityEntry" class="fixed inset-0 z-50">
+      <div v-if="activityDetailOpen && selectedActivityEntry" class="fixed inset-0 z-50 flex items-center justify-center px-4">
         <button
           type="button"
-          class="absolute inset-0 cursor-default bg-transparent"
+          class="absolute inset-0 cursor-default bg-slate-950/70 backdrop-blur-sm"
           aria-label="Close request details"
           @click="closeActivityDetail"
         ></button>
-        <div class="pointer-events-none absolute inset-0">
-          <div
-            ref="activityDetailCard"
-            class="pointer-events-auto absolute w-80 max-w-[90vw] rounded-xl border border-slate-800 bg-slate-950/95 p-5 shadow-2xl outline-none"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="activity-detail-title"
-            tabindex="-1"
-            :style="{ top: `${activityDetailPosition.top}px`, left: `${activityDetailPosition.left}px` }"
-          >
+        <div
+          ref="activityDetailCard"
+          class="relative z-10 w-full max-w-md rounded-2xl border border-slate-800 bg-slate-950/95 p-6 shadow-2xl outline-none"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="activity-detail-title"
+          tabindex="-1"
+        >
           <div class="flex items-start justify-between gap-3">
             <div class="space-y-1">
               <p id="activity-detail-title" class="text-sm font-semibold text-slate-100">{{ selectedActivityEntry.label || 'Request details' }}</p>
@@ -891,7 +889,6 @@
             >
               Close
             </button>
-          </div>
           </div>
         </div>
       </div>
@@ -959,12 +956,6 @@
           const activityDetailOpen = ref(false);
           const selectedActivityEntry = ref(null);
           const activityDetailCard = ref(null);
-          const activityDetailPosition = reactive({
-            top: window.innerHeight ? window.innerHeight / 2 : 0,
-            left: window.innerWidth ? Math.max(16, window.innerWidth - 320) : 0,
-          });
-          const activityDetailAnchor = reactive({ top: null, left: null, width: 0, height: 0 });
-          let activityDetailRaf = null;
           const exportState = reactive({
             running: false,
             progress: '',
@@ -984,67 +975,6 @@
             hour12: true,
           });
           const numberFormatter = new Intl.NumberFormat('en-US');
-          const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-
-          const updateActivityDetailPosition = () => {
-            const viewportWidth = window.innerWidth || 0;
-            const viewportHeight = window.innerHeight || 0;
-            const cardEl = activityDetailCard.value;
-            const cardWidth = cardEl ? cardEl.offsetWidth : 0;
-            const cardHeight = cardEl ? cardEl.offsetHeight : 0;
-            const safeWidth = cardWidth || 320;
-            const safeHeight = cardHeight || 240;
-            const margin = 16;
-            const gap = 16;
-
-            const anchorTop = typeof activityDetailAnchor.top === 'number' ? activityDetailAnchor.top : (viewportHeight ? viewportHeight / 2 : 0);
-            const anchorHeight = activityDetailAnchor.height || 0;
-            const anchorLeft = typeof activityDetailAnchor.left === 'number' ? activityDetailAnchor.left : (viewportWidth ? viewportWidth - margin : 0);
-            const anchorWidth = activityDetailAnchor.width || 0;
-
-            const anchorCenterY = anchorTop + (anchorHeight ? anchorHeight / 2 : 0);
-            let top = anchorCenterY - safeHeight / 2;
-            if (viewportHeight) {
-              const maxTop = viewportHeight - margin - safeHeight;
-              top = clamp(top, margin, Math.max(margin, maxTop));
-            } else {
-              top = Math.max(0, top);
-            }
-
-            let left = anchorLeft - gap - safeWidth;
-            if (viewportWidth) {
-              const maxLeft = viewportWidth - margin - safeWidth;
-              if (left < margin) {
-                left = anchorLeft + anchorWidth + gap;
-                left = clamp(left, margin, Math.max(margin, maxLeft));
-              } else {
-                left = clamp(left, margin, Math.max(margin, maxLeft));
-              }
-            } else {
-              left = Math.max(0, left);
-            }
-
-            activityDetailPosition.top = Number.isFinite(top) ? top : 0;
-            activityDetailPosition.left = Number.isFinite(left) ? left : 0;
-          };
-
-          const scheduleActivityDetailUpdate = () => {
-            if (!activityDetailOpen.value) return;
-            if (activityDetailRaf !== null) return;
-            activityDetailRaf = window.requestAnimationFrame(() => {
-              activityDetailRaf = null;
-              updateActivityDetailPosition();
-            });
-          };
-
-          const handleResize = () => {
-            scheduleActivityDetailUpdate();
-          };
-
-          const handleScroll = () => {
-            scheduleActivityDetailUpdate();
-          };
-
           const createActivityEntry = ({ label, method, url, target }) => {
             const entry = {
               id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1243,7 +1173,7 @@
             return segments.join(' · ') || 'Request';
           };
 
-          const openActivityDetail = (entry, event) => {
+          const openActivityDetail = (entry) => {
             if (!entry) {
               closeActivityDetail();
               return;
@@ -1251,20 +1181,7 @@
 
             selectedActivityEntry.value = entry;
             activityDetailOpen.value = true;
-            if (event?.currentTarget instanceof HTMLElement) {
-              const rect = event.currentTarget.getBoundingClientRect();
-              activityDetailAnchor.top = rect.top;
-              activityDetailAnchor.left = rect.left;
-              activityDetailAnchor.width = rect.width;
-              activityDetailAnchor.height = rect.height;
-            } else {
-              activityDetailAnchor.top = null;
-              activityDetailAnchor.left = null;
-              activityDetailAnchor.width = 0;
-              activityDetailAnchor.height = 0;
-            }
             nextTick(() => {
-              updateActivityDetailPosition();
               const card = activityDetailCard.value;
               if (card && typeof card.focus === 'function') {
                 card.focus();
@@ -1275,14 +1192,6 @@
           const closeActivityDetail = () => {
             activityDetailOpen.value = false;
             selectedActivityEntry.value = null;
-            activityDetailAnchor.top = null;
-            activityDetailAnchor.left = null;
-            activityDetailAnchor.width = 0;
-            activityDetailAnchor.height = 0;
-            if (activityDetailRaf !== null) {
-              window.cancelAnimationFrame(activityDetailRaf);
-              activityDetailRaf = null;
-            }
           };
 
           const clearActivityLog = () => {
@@ -1295,15 +1204,8 @@
             const stillExists = entries.some(entry => entry.id === selectedActivityEntry.value.id);
             if (!stillExists) {
               closeActivityDetail();
-              return;
             }
-            nextTick(updateActivityDetailPosition);
           }, { deep: true });
-
-          watch(activityDetailOpen, (isOpen) => {
-            if (!isOpen) return;
-            nextTick(updateActivityDetailPosition);
-          });
 
           const handleKeydown = (event) => {
             if (event.key === 'Escape' && activityDetailOpen.value) {
@@ -2643,8 +2545,6 @@
             loadCollections();
             statusPoller = window.setInterval(checkBackendStatus, 30000);
             window.addEventListener('keydown', handleKeydown);
-            window.addEventListener('resize', handleResize);
-            window.addEventListener('scroll', handleScroll, true);
           });
 
           onBeforeUnmount(() => {
@@ -2653,12 +2553,6 @@
               statusPoller = null;
             }
             window.removeEventListener('keydown', handleKeydown);
-            window.removeEventListener('resize', handleResize);
-            window.removeEventListener('scroll', handleScroll, true);
-            if (activityDetailRaf !== null) {
-              window.cancelAnimationFrame(activityDetailRaf);
-              activityDetailRaf = null;
-            }
           });
 
           return {
@@ -2697,7 +2591,6 @@
             activityDetailOpen,
             selectedActivityEntry,
             activityDetailCard,
-            activityDetailPosition,
             exportState,
             sizeMetrics,
             sizeMetricsEntries,

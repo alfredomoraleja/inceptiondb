@@ -685,8 +685,8 @@
         >
           <button
             type="button"
-            class="flex h-2 w-2 items-center justify-center rounded-full border transition transform hover:scale-125 focus:outline-none focus:ring-2 focus:ring-sky-400/40"
-            :class="activityStatusCircleClass(entry.status)"
+            class="block h-2 w-2 rounded-full transform transition-transform duration-200 hover:scale-125 focus:outline-none focus:ring-2 focus:ring-sky-400/40"
+            :class="activityStatusDotClass(entry.status)"
             @click="showCurlPreview(entry)"
           >
             <span class="sr-only">Show cURL command for {{ entry.label }}</span>
@@ -1027,14 +1027,14 @@
             }
           };
 
-          const activityStatusCircleClass = (status) => {
+          const activityStatusDotClass = (status) => {
             switch (status) {
               case 'success':
-                return 'border-emerald-400/80 bg-emerald-500/70 hover:bg-emerald-400/80';
+                return 'bg-emerald-400';
               case 'error':
-                return 'border-rose-400/80 bg-rose-500/70 hover:bg-rose-400/80';
+                return 'bg-rose-400';
               default:
-                return 'border-sky-400/80 bg-sky-500/70 hover:bg-sky-400/80';
+                return 'bg-sky-400';
             }
           };
 
@@ -2302,7 +2302,7 @@
             formatActivityTime,
             formatDuration,
             activityStatusLabel,
-            activityStatusCircleClass,
+            activityStatusDotClass,
             activityStatusBadgeClass,
             clearActivityLog,
             showCurlPreview,

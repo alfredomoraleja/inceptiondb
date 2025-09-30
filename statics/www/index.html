@@ -692,20 +692,23 @@
             <span class="sr-only">Show cURL command for {{ entry.label }}</span>
           </button>
           <div
-            class="pointer-events-none absolute right-full top-1/2 z-40 hidden -translate-y-1/2 transform flex-col gap-2 pr-3 group-hover:flex"
+            class="pointer-events-none absolute right-full top-1/2 z-40 hidden -translate-y-1/2 transform pr-4 group-hover:flex"
           >
-            <div class="w-56 max-w-xs rounded-lg border border-slate-800 bg-slate-950/95 p-3 text-left shadow-xl">
-              <p class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{{ entry.method }} · {{ activityStatusLabel(entry.status) }}</p>
-              <p class="mt-1 text-xs font-semibold text-slate-200">{{ entry.label }}</p>
-              <p class="mt-2 text-[11px] text-slate-400 break-words">{{ entry.url }}</p>
-              <p v-if="entry.target" class="mt-1 text-[11px] uppercase tracking-wide text-slate-500">Target: {{ entry.target }}</p>
-              <p v-if="entry.detail" class="mt-2 text-[11px] text-slate-300">{{ entry.detail }}</p>
-              <p v-if="entry.statusCode" class="mt-1 text-[11px] uppercase tracking-wide text-slate-500">HTTP {{ entry.statusCode }}</p>
-              <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-wide text-slate-500">
-                <span>{{ formatActivityTime(entry.startedAt) }}</span>
-                <span v-if="entry.durationMs !== null">{{ formatDuration(entry.durationMs) }}</span>
+            <div class="flex items-start gap-3 text-left">
+              <span class="mt-0.5 block h-2 w-2 rounded-full bg-white shadow-lg"></span>
+              <div class="flex min-w-[13rem] max-w-[16rem] flex-col gap-1 text-[11px] text-slate-200 drop-shadow">
+                <p class="font-semibold uppercase tracking-wide text-slate-400">{{ entry.method }} · {{ activityStatusLabel(entry.status) }}</p>
+                <p class="text-xs font-semibold text-slate-100">{{ entry.label }}</p>
+                <p class="text-slate-300 break-words">{{ entry.url }}</p>
+                <p v-if="entry.target" class="uppercase tracking-wide text-slate-400">Target: {{ entry.target }}</p>
+                <p v-if="entry.detail" class="text-slate-200/90">{{ entry.detail }}</p>
+                <p v-if="entry.statusCode" class="uppercase tracking-wide text-slate-400">HTTP {{ entry.statusCode }}</p>
+                <div class="flex flex-wrap items-center gap-3 uppercase tracking-wide text-slate-400">
+                  <span>{{ formatActivityTime(entry.startedAt) }}</span>
+                  <span v-if="entry.durationMs !== null">{{ formatDuration(entry.durationMs) }}</span>
+                </div>
+                <p class="uppercase tracking-wide text-slate-400">Click to view cURL command.</p>
               </div>
-              <p class="mt-2 text-[11px] uppercase tracking-wide text-slate-500">Click to view cURL command.</p>
             </div>
           </div>
         </div>

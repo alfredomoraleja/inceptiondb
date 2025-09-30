@@ -57,9 +57,9 @@
     <script src="/lib/axios.min.js"></script>
     <script src="/lib/vue.global.prod.js"></script>
   </head>
-  <body class="bg-slate-950 text-slate-100 min-h-screen">
-    <div id="app" class="min-h-screen flex">
-      <aside class="w-72 bg-slate-900 border-r border-slate-800 flex flex-col">
+  <body class="bg-slate-950 text-slate-100 h-screen overflow-hidden">
+    <div id="app" class="flex h-full">
+      <aside class="w-72 bg-slate-900 border-r border-slate-800 flex flex-col overflow-hidden">
         <div class="px-6 py-5 border-b border-slate-800">
           <div class="flex items-center justify-between">
             <h1 class="text-xl font-semibold tracking-wide">InceptionDB</h1>
@@ -156,43 +156,47 @@
         </div>
       </aside>
 
-      <main class="flex-1">
-        <div v-if="!selectedCollection" class="flex h-full flex-col items-center justify-center text-center gap-3 px-6">
+      <main class="flex flex-1 flex-col overflow-hidden">
+        <div
+          v-if="!selectedCollection"
+          class="flex flex-1 flex-col items-center justify-center text-center gap-3 px-6"
+        >
           <h2 class="text-2xl font-semibold text-slate-200">Welcome to InceptionDB</h2>
           <p class="text-slate-400 max-w-md">Select or create a collection in the sidebar to start querying, inserting, or deleting documents.</p>
         </div>
 
-        <div v-else class="flex flex-col gap-6 p-6">
-          <header class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 class="text-2xl font-semibold text-slate-100">Collection {{ selectedCollection.name }}</h2>
-              <p class="text-sm text-slate-400 flex flex-wrap items-center gap-3">
-                <span v-if="selectedCollection.total !== undefined">Total: {{ selectedCollection.total }}</span>
-                <span v-if="queryStats.elapsed">Last query: {{ queryStats.elapsed }}</span>
-                <span v-if="queryStats.returned">Documents listed: {{ queryStats.returned }}</span>
-              </p>
-            </div>
-            <div class="flex flex-wrap gap-2">
-              <button
-                type="button"
-                class="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800 transition"
-                @click="runQuery"
-              >
-                Run query
-              </button>
-              <button
-                type="button"
-                class="rounded-md border border-rose-500/40 bg-rose-600/20 px-3 py-2 text-sm font-medium text-rose-300 hover:bg-rose-600/30 transition"
-                @click="dropCollection"
-              >
-                Delete collection
-              </button>
-            </div>
-          </header>
+        <div v-else class="flex-1 overflow-y-auto">
+          <div class="flex flex-col gap-6 p-6">
+            <header class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h2 class="text-2xl font-semibold text-slate-100">Collection {{ selectedCollection.name }}</h2>
+                <p class="text-sm text-slate-400 flex flex-wrap items-center gap-3">
+                  <span v-if="selectedCollection.total !== undefined">Total: {{ selectedCollection.total }}</span>
+                  <span v-if="queryStats.elapsed">Last query: {{ queryStats.elapsed }}</span>
+                  <span v-if="queryStats.returned">Documents listed: {{ queryStats.returned }}</span>
+                </p>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  class="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800 transition"
+                  @click="runQuery"
+                >
+                  Run query
+                </button>
+                <button
+                  type="button"
+                  class="rounded-md border border-rose-500/40 bg-rose-600/20 px-3 py-2 text-sm font-medium text-rose-300 hover:bg-rose-600/30 transition"
+                  @click="dropCollection"
+                >
+                  Delete collection
+                </button>
+              </div>
+            </header>
 
-          <section class="grid gap-6 lg:grid-cols-[2fr_1fr]">
-            <div class="space-y-6">
-              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner space-y-5">
+            <section class="grid gap-6 lg:grid-cols-[2fr_1fr]">
+              <div class="space-y-6">
+                <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner space-y-5">
                 <div>
                   <label for="filter" class="block text-xs uppercase tracking-wide text-slate-400">Filter (JSON)</label>
                   <textarea
@@ -1010,6 +1014,7 @@
 
             </div>
           </section>
+          </div>
         </div>
       </main>
       <div

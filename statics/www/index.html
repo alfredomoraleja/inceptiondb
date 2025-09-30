@@ -515,6 +515,79 @@
               </div>
 
               <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner space-y-4">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 class="text-sm font-semibold text-slate-200 uppercase tracking-wide">Import documents</h3>
+                    <p class="mt-1 text-xs text-slate-400">
+                      Stream JSONL or CSV files without loading them entirely in memory.
+                    </p>
+                  </div>
+                  <button
+                    v-if="importState.running"
+                    type="button"
+                    class="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition"
+                    @click="cancelImport()"
+                  >
+                    Cancel import
+                  </button>
+                </div>
+                <div class="space-y-3">
+                  <label class="block text-xs uppercase tracking-wide text-slate-400">
+                    File
+                    <input
+                      :key="importFileInputKey"
+                      type="file"
+                      class="mt-1 block w-full cursor-pointer rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                      accept=".jsonl,.ndjson,.json,.txt,.csv"
+                      :disabled="importState.running"
+                      @change="handleImportFileChange"
+                    >
+                  </label>
+                  <p v-if="importSelectedFileLabel" class="text-xs text-slate-400">Selected: {{ importSelectedFileLabel }}</p>
+                  <label class="block text-xs uppercase tracking-wide text-slate-400">
+                    Format
+                    <select
+                      v-model="importState.format"
+                      class="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                      :disabled="importState.running"
+                    >
+                      <option value="auto">Auto-detect</option>
+                      <option value="jsonl">JSON Lines (.jsonl, .ndjson)</option>
+                      <option value="csv">CSV (.csv)</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <p v-if="importState.activeFormat" class="text-xs text-slate-400">
+                    Using {{ importState.activeFormat === 'csv' ? 'CSV to JSONL conversion' : 'JSONL streaming' }}
+                  </p>
+                  <div class="flex flex-wrap gap-2">
+                    <button
+                      v-if="importState.file"
+                      type="button"
+                      class="rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-800 transition disabled:cursor-not-allowed disabled:opacity-60"
+                      :disabled="importState.running"
+                      @click="clearImportFile"
+                    >
+                      Clear file
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-500 transition disabled:cursor-not-allowed disabled:opacity-60"
+                      :disabled="importState.running || !importState.file || !selectedCollection"
+                      @click="startImport"
+                    >
+                      {{ importState.running ? 'Importing…' : 'Start import' }}
+                    </button>
+                  </div>
+                </div>
+                <p v-if="importProgressDetails" class="text-xs text-slate-300">{{ importProgressDetails }}</p>
+                <p v-if="importState.status" class="text-xs text-slate-400">{{ importState.status }}</p>
+                <p v-if="importState.error" class="text-sm text-rose-400">{{ importState.error }}</p>
+                <p v-else-if="importState.success" class="text-sm text-emerald-400">{{ importState.success }}</p>
+              </div>
+
+              <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-5 shadow-inner space-y-4">
                 <div class="flex items-center justify-between gap-3">
                   <h3 class="text-sm font-semibold text-slate-200 uppercase tracking-wide">Indexes</h3>
                   <button
@@ -728,6 +801,23 @@
           const rangeTo = reactive({});
           const editingDocuments = reactive({});
           const insertForm = reactive({ payload: '{\n\n}', error: '', success: '' });
+          const importState = reactive({
+            file: null,
+            format: 'auto',
+            activeFormat: '',
+            running: false,
+            inserted: 0,
+            failed: 0,
+            processedBytes: 0,
+            totalBytes: 0,
+            status: '',
+            error: '',
+            success: '',
+            startTime: 0,
+            controller: null,
+            silentCancel: false,
+          });
+          const importFileInputKey = ref(0);
           const createForm = reactive({ open: false, name: '', error: '' });
           const indexForm = reactive({
             open: false,
@@ -865,6 +955,48 @@
             document.body.removeChild(anchor);
             URL.revokeObjectURL(objectUrl);
           };
+
+          const formatBytes = (bytes) => {
+            const value = Number(bytes);
+            if (!Number.isFinite(value) || value <= 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const exponent = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+            const size = value / 1024 ** exponent;
+            const formatted = size >= 10 || exponent === 0 ? size.toFixed(0) : size.toFixed(1);
+            return `${formatted.replace(/\.0$/, '')} ${units[exponent]}`;
+          };
+
+          const nowMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function'
+            ? performance.now()
+            : Date.now());
+
+          const importSelectedFileLabel = computed(() => {
+            if (!importState.file) return '';
+            const parts = [importState.file.name];
+            if (Number.isFinite(importState.file.size)) {
+              parts.push(`· ${formatBytes(importState.file.size)}`);
+            }
+            return parts.join(' ');
+          });
+
+          const importProgressDetails = computed(() => {
+            const parts = [];
+            if (importState.processedBytes > 0) {
+              if (importState.totalBytes > 0) {
+                const percent = Math.min(100, Math.round((importState.processedBytes / importState.totalBytes) * 100));
+                parts.push(`Streamed ${formatBytes(importState.processedBytes)} of ${formatBytes(importState.totalBytes)} (${percent}%)`);
+              } else {
+                parts.push(`Streamed ${formatBytes(importState.processedBytes)}`);
+              }
+            }
+            if (importState.inserted > 0) {
+              parts.push(`${importState.inserted} inserted`);
+            }
+            if (importState.failed > 0) {
+              parts.push(`${importState.failed} errors`);
+            }
+            return parts.join(' • ');
+          });
 
           const formatDuration = (ms) => {
             if (typeof ms !== 'number' || Number.isNaN(ms)) return '';
@@ -1032,6 +1164,551 @@
             }
             indexMessages.error = '';
             indexMessages.success = '';
+          };
+
+          const resolveImportFormat = (file, choice) => {
+            const normalized = String(choice || 'auto').toLowerCase();
+            if (normalized === 'jsonl' || normalized === 'csv') {
+              return normalized;
+            }
+            if (file && typeof file.name === 'string') {
+              const name = file.name.toLowerCase();
+              if (name.endsWith('.csv')) return 'csv';
+            }
+            return 'jsonl';
+          };
+
+          const handleImportFileChange = (event) => {
+            if (importState.running) return;
+            const fileList = event?.target?.files;
+            importState.file = fileList && fileList[0] ? fileList[0] : null;
+            importState.activeFormat = '';
+            importState.processedBytes = 0;
+            importState.totalBytes = importState.file ? importState.file.size : 0;
+            importState.inserted = 0;
+            importState.failed = 0;
+            importState.error = '';
+            importState.success = '';
+            importState.status = '';
+          };
+
+          const clearImportFile = () => {
+            if (importState.running) return;
+            importState.file = null;
+            importState.activeFormat = '';
+            importState.processedBytes = 0;
+            importState.totalBytes = 0;
+            importState.inserted = 0;
+            importState.failed = 0;
+            importState.error = '';
+            importState.success = '';
+            importState.status = '';
+            importFileInputKey.value += 1;
+          };
+
+          const createJsonlStream = (file, { signal, onBytes } = {}) => {
+            const reader = file.stream().getReader();
+            let firstChunk = true;
+            let aborted = false;
+            let controllerRef = null;
+            let abortListener = null;
+
+            const removeAbortListener = () => {
+              if (signal && abortListener) {
+                signal.removeEventListener('abort', abortListener);
+                abortListener = null;
+              }
+            };
+
+            const releaseReader = () => {
+              try {
+                reader.releaseLock();
+              } catch (err) {
+                // no-op if already released
+              }
+            };
+
+            const handleAbort = () => {
+              if (aborted) return;
+              aborted = true;
+              removeAbortListener();
+              reader.cancel('aborted').catch(() => {}).finally(() => {
+                releaseReader();
+              });
+              if (controllerRef) {
+                controllerRef.error(new DOMException('Aborted', 'AbortError'));
+              }
+            };
+
+            return new ReadableStream({
+              start(controller) {
+                controllerRef = controller;
+                if (signal) {
+                  if (signal.aborted) {
+                    handleAbort();
+                    return;
+                  }
+                  abortListener = handleAbort;
+                  signal.addEventListener('abort', abortListener);
+                }
+              },
+              async pull(controller) {
+                try {
+                  const { value, done } = await reader.read();
+                  if (done) {
+                    removeAbortListener();
+                    releaseReader();
+                    controller.close();
+                    return;
+                  }
+                  if (value) {
+                    if (onBytes) onBytes(value.byteLength);
+                    let chunk = value;
+                    if (firstChunk && value.byteLength >= 3 && value[0] === 0xef && value[1] === 0xbb && value[2] === 0xbf) {
+                      chunk = value.slice(3);
+                    }
+                    firstChunk = false;
+                    if (chunk.byteLength > 0) {
+                      controller.enqueue(chunk);
+                    }
+                  }
+                } catch (err) {
+                  removeAbortListener();
+                  releaseReader();
+                  if (!aborted) {
+                    controller.error(err);
+                  }
+                }
+              },
+              cancel(reason) {
+                removeAbortListener();
+                if (!aborted) {
+                  reader.cancel(reason).catch(() => {}).finally(() => {
+                    releaseReader();
+                  });
+                } else {
+                  releaseReader();
+                }
+              },
+            });
+          };
+
+          const parseCsvLine = (line, delimiter = ',') => {
+            const result = [];
+            let current = '';
+            let inQuotes = false;
+            for (let idx = 0; idx < line.length; idx += 1) {
+              const char = line[idx];
+              if (inQuotes) {
+                if (char === '"') {
+                  if (line[idx + 1] === '"') {
+                    current += '"';
+                    idx += 1;
+                  } else {
+                    inQuotes = false;
+                  }
+                } else {
+                  current += char;
+                }
+              } else if (char === '"') {
+                inQuotes = true;
+              } else if (char === delimiter) {
+                result.push(current);
+                current = '';
+              } else {
+                current += char;
+              }
+            }
+            if (inQuotes) {
+              throw new Error('Unclosed quoted value.');
+            }
+            result.push(current);
+            return result;
+          };
+
+          const createCsvToJsonlStream = (file, { signal, onBytes, delimiter = ',' } = {}) => {
+            const encoder = new TextEncoder();
+            const decoder = new TextDecoder();
+            const reader = file.stream().getReader();
+            const pendingChunks = [];
+            let buffer = '';
+            let headers = null;
+            let processedLines = 0;
+            let doneReading = false;
+            let aborted = false;
+            let controllerRef = null;
+            let abortListener = null;
+
+            const removeAbortListener = () => {
+              if (signal && abortListener) {
+                signal.removeEventListener('abort', abortListener);
+                abortListener = null;
+              }
+            };
+
+            const releaseReader = () => {
+              try {
+                reader.releaseLock();
+              } catch (err) {
+                // ignore if already released
+              }
+            };
+
+            const enqueueRecord = (record) => {
+              pendingChunks.push(encoder.encode(`${JSON.stringify(record)}\n`));
+            };
+
+            const processLine = (rawLine) => {
+              const currentLine = processedLines + 1;
+              const line = rawLine.replace(/\r$/, '');
+              try {
+                if (headers === null) {
+                  const cleaned = line.replace(/^\ufeff/, '');
+                  const parsedHeaders = parseCsvLine(cleaned, delimiter).map((name, index) => {
+                    const trimmed = name.trim();
+                    return trimmed || `field_${index + 1}`;
+                  });
+                  if (parsedHeaders.length === 0) {
+                    const headerError = new Error('CSV header row is empty.');
+                    headerError.isCsvError = true;
+                    throw headerError;
+                  }
+                  headers = parsedHeaders;
+                  processedLines = currentLine;
+                  return;
+                }
+                if (!line.trim()) {
+                  processedLines = currentLine;
+                  return;
+                }
+                const values = parseCsvLine(line, delimiter);
+                const record = {};
+                const length = Math.max(headers.length, values.length);
+                for (let index = 0; index < length; index += 1) {
+                  const key = headers[index] || `field_${index + 1}`;
+                  record[key] = values[index] !== undefined ? values[index] : '';
+                }
+                enqueueRecord(record);
+                processedLines = currentLine;
+              } catch (err) {
+                const message = err?.message || String(err);
+                const parseError = new Error(`CSV parsing error on line ${currentLine}: ${message}`);
+                parseError.isCsvError = true;
+                throw parseError;
+              }
+            };
+
+            const flushPending = (controller) => {
+              if (pendingChunks.length > 0) {
+                controller.enqueue(pendingChunks.shift());
+                return true;
+              }
+              return false;
+            };
+
+            const handleAbort = () => {
+              if (aborted) return;
+              aborted = true;
+              pendingChunks.length = 0;
+              removeAbortListener();
+              reader
+                .cancel('aborted')
+                .catch(() => {})
+                .finally(() => {
+                  releaseReader();
+                });
+              if (controllerRef) {
+                controllerRef.error(new DOMException('Aborted', 'AbortError'));
+              }
+            };
+
+            return new ReadableStream({
+              start(controller) {
+                controllerRef = controller;
+                if (signal) {
+                  if (signal.aborted) {
+                    handleAbort();
+                    return;
+                  }
+                  abortListener = handleAbort;
+                  signal.addEventListener('abort', abortListener);
+                }
+              },
+              async pull(controller) {
+                if (flushPending(controller)) {
+                  return;
+                }
+                try {
+                  while (true) {
+                    if (buffer) {
+                      const newlineIndex = buffer.indexOf('\n');
+                      if (newlineIndex >= 0) {
+                        const line = buffer.slice(0, newlineIndex);
+                        buffer = buffer.slice(newlineIndex + 1);
+                        processLine(line);
+                        if (flushPending(controller)) {
+                          return;
+                        }
+                        continue;
+                      }
+                    }
+                    if (doneReading) {
+                      if (buffer) {
+                        processLine(buffer);
+                        buffer = '';
+                        if (flushPending(controller)) {
+                          return;
+                        }
+                      }
+                      if (headers === null) {
+                        const emptyError = new Error('The CSV file is empty or missing a header row.');
+                        emptyError.isCsvError = true;
+                        removeAbortListener();
+                        releaseReader();
+                        controller.error(emptyError);
+                        return;
+                      }
+                      removeAbortListener();
+                      releaseReader();
+                      controller.close();
+                      return;
+                    }
+                    const { value, done } = await reader.read();
+                    if (done) {
+                      doneReading = true;
+                      buffer += decoder.decode();
+                    } else if (value) {
+                      if (onBytes) onBytes(value.byteLength);
+                      buffer += decoder.decode(value, { stream: true });
+                    }
+                  }
+                } catch (err) {
+                  removeAbortListener();
+                  releaseReader();
+                  if (!aborted) {
+                    controller.error(err);
+                  }
+                }
+              },
+              cancel(reason) {
+                removeAbortListener();
+                if (!aborted) {
+                  reader.cancel(reason).catch(() => {}).finally(() => {
+                    releaseReader();
+                  });
+                } else {
+                  releaseReader();
+                }
+              },
+            });
+          };
+
+          const cancelImport = ({ silent = false } = {}) => {
+            if (!importState.controller) return;
+            importState.silentCancel = !!silent;
+            if (!silent) {
+              importState.status = 'Cancelling import…';
+            }
+            importState.controller.abort();
+          };
+
+          const startImport = async () => {
+            if (importState.running) return;
+            importState.error = '';
+            importState.success = '';
+            importState.status = '';
+            importState.inserted = 0;
+            importState.failed = 0;
+            importState.processedBytes = 0;
+            importState.totalBytes = importState.file ? importState.file.size : 0;
+            importState.activeFormat = '';
+            importState.silentCancel = false;
+            if (!selectedCollection.value) {
+              importState.error = 'Select a collection before importing.';
+              return;
+            }
+            if (!importState.file) {
+              importState.error = 'Choose a file to import.';
+              return;
+            }
+
+            const file = importState.file;
+            const resolvedFormat = resolveImportFormat(file, importState.format);
+            importState.activeFormat = resolvedFormat;
+            importState.running = true;
+            importState.startTime = nowMs();
+            importState.status = 'Preparing import…';
+
+            const controller = new AbortController();
+            importState.controller = controller;
+
+            const collectionName = selectedCollection.value.name;
+            const url = `/v1/collections/${encodeURIComponent(collectionName)}:insertStream`;
+            const entry = createActivityEntry({
+              label: `Import ${file.name}`,
+              method: 'POST',
+              url,
+              target: collectionName,
+            });
+            entry.detail = importState.status;
+
+            const updateUploadStatus = () => {
+              if (importState.processedBytes <= 0) {
+                importState.status = 'Streaming file…';
+                entry.detail = importState.status;
+                return;
+              }
+              if (importState.totalBytes > 0) {
+                const percent = Math.min(100, Math.round((importState.processedBytes / importState.totalBytes) * 100));
+                importState.status = `Streaming ${formatBytes(importState.processedBytes)} (${percent}% of file)…`;
+              } else {
+                importState.status = `Streaming ${formatBytes(importState.processedBytes)}…`;
+              }
+              entry.detail = importState.status;
+            };
+
+            const onBytes = (delta) => {
+              importState.processedBytes += Number(delta) || 0;
+              updateUploadStatus();
+            };
+
+            try {
+              const bodyStream = resolvedFormat === 'csv'
+                ? createCsvToJsonlStream(file, { signal: controller.signal, onBytes })
+                : createJsonlStream(file, { signal: controller.signal, onBytes });
+
+              const response = await fetch(url, {
+                method: 'POST',
+                body: bodyStream,
+                headers: {
+                  'Content-Type': 'application/x-ndjson',
+                },
+                signal: controller.signal,
+                duplex: 'half',
+              });
+
+              const statusCode = response.status;
+              if (!response.ok) {
+                const errorText = await response.text();
+                const httpError = new Error(errorText || `Import failed (HTTP ${statusCode}).`);
+                httpError.statusCode = statusCode;
+                throw httpError;
+              }
+
+              markConnectionOnline();
+              importState.status = 'Processing server response…';
+              entry.detail = importState.status;
+
+              if (!response.body) {
+                importState.running = false;
+                importState.controller = null;
+                importState.success = 'Import completed successfully.';
+                importState.status = `Completed in ${formatDuration(Math.round(nowMs() - importState.startTime))}.`;
+                entry.detail = importState.success;
+                completeActivityEntry(entry, {
+                  detail: importState.success,
+                  statusCode,
+                });
+                await runQuery();
+                await loadCollections();
+                return;
+              }
+
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+
+              const processLine = (line) => {
+                let parsed;
+                try {
+                  parsed = JSON.parse(line);
+                } catch (err) {
+                  importState.failed += 1;
+                  return;
+                }
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                  importState.inserted += 1;
+                } else {
+                  importState.failed += 1;
+                }
+              };
+
+              try {
+                while (true) {
+                  const { value, done } = await reader.read();
+                  if (done) break;
+                  if (value) {
+                    buffer += decoder.decode(value, { stream: true });
+                    let newlineIndex = buffer.indexOf('\n');
+                    while (newlineIndex >= 0) {
+                      const line = buffer.slice(0, newlineIndex).trim();
+                      buffer = buffer.slice(newlineIndex + 1);
+                      if (line) {
+                        processLine(line);
+                        const elapsed = Math.round(nowMs() - importState.startTime);
+                        const parts = [`${importState.inserted} inserted`];
+                        if (importState.failed > 0) {
+                          parts.push(`${importState.failed} errors`);
+                        }
+                        parts.push(`elapsed ${formatDuration(elapsed)}`);
+                        importState.status = parts.join(' • ');
+                        entry.detail = importState.status;
+                      }
+                      newlineIndex = buffer.indexOf('\n');
+                    }
+                  }
+                }
+                buffer += decoder.decode();
+              } finally {
+                reader.releaseLock();
+              }
+              const remaining = buffer.trim();
+              if (remaining) {
+                processLine(remaining);
+              }
+
+              const elapsedTotal = Math.round(nowMs() - importState.startTime);
+              importState.running = false;
+              importState.success = importState.failed
+                ? `Imported ${importState.inserted} documents with ${importState.failed} errors.`
+                : `Imported ${importState.inserted} documents successfully.`;
+              importState.status = `Completed in ${formatDuration(elapsedTotal)}.`;
+              entry.detail = importState.success;
+
+              completeActivityEntry(entry, {
+                detail: `Imported ${importState.inserted} documents${importState.failed ? `, ${importState.failed} errors` : ''}.`,
+                statusCode,
+              });
+
+              await runQuery();
+              await loadCollections();
+            } catch (error) {
+              importState.running = false;
+              const isAbort = error?.name === 'AbortError';
+              if (isAbort) {
+                if (!importState.silentCancel) {
+                  importState.status = 'Import cancelled.';
+                }
+                importState.silentCancel = false;
+                failActivityEntry(entry, error, { fallback: 'Import cancelled.' });
+              } else {
+                const message = error?.message || 'Failed to import documents.';
+                importState.error = message;
+                importState.status = '';
+                failActivityEntry(entry, error, { fallback: message });
+                importState.silentCancel = false;
+                if (error?.response) {
+                  handleRequestError(error);
+                } else if (error?.statusCode) {
+                  markConnectionDegraded(`Unexpected response (HTTP ${error.statusCode})`);
+                } else if (!error?.isCsvError) {
+                  markConnectionOffline('Network error while importing documents.');
+                }
+              }
+            } finally {
+              importState.controller = null;
+              importState.silentCancel = false;
+            }
           };
 
           const ensureEditState = (id) => {
@@ -1848,6 +2525,17 @@
 
           watch(selectedCollectionName, () => {
             clearEditingDocuments();
+            if (importState.running) {
+              cancelImport({ silent: true });
+            }
+            importState.success = '';
+            importState.error = '';
+            importState.status = '';
+            importState.inserted = 0;
+            importState.failed = 0;
+            importState.processedBytes = 0;
+            importState.totalBytes = importState.file ? importState.file.size : 0;
+            importState.activeFormat = '';
           });
 
           watch(queryRows, (rows) => {
@@ -2091,6 +2779,8 @@
             indexForm,
             indexMessages,
             insertForm,
+            importState,
+            importFileInputKey,
             createForm,
             connectionStatus,
             activityLog,
@@ -2114,8 +2804,11 @@
             isSelected,
             toggleCreateForm,
             toggleIndexForm,
+            handleImportFileChange,
+            clearImportFile,
             selectCollection,
             runQuery,
+            startImport,
             exportResults,
             nextPage,
             prevPage,
@@ -2141,6 +2834,9 @@
             activityStatusLabel,
             activityStatusBadgeClass,
             clearActivityLog,
+            importSelectedFileLabel,
+            importProgressDetails,
+            cancelImport,
           };
         },
       }).mount('#app');

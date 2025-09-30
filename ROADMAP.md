@@ -11,6 +11,7 @@
 * Implementar el botón de eliminar documentos por ID (sólo front)
 * Implementar vista tabular alterna para resultados (sólo front)
 * Implementar exportación de resultados a JSONL desde la consola (sólo front)
+* Implementar importar desde JSONL y desde CSV (sólo front)
 
 ## Next features
 
@@ -31,6 +32,8 @@
 * Añadir botón para copiar documentos de los resultados al portapapeles (sólo front)
 * Implementar indicadores de progreso visibles en botones de acciones largas (sólo front)
 * Guardar un historial local de filtros recientes durante la sesión (sólo front)
+* Añadir soporte de arrastrar y soltar archivos para importaciones masivas (sólo front)
+* Permitir configurar delimitadores y codificación al importar CSV (sólo front)
 
 ## Will not do these features
 

@@ -1022,20 +1022,49 @@
           role="list"
           aria-label="Recent requests"
         >
-          <button
+          <div
             v-for="entry in activityLog"
             :key="entry.id"
-            type="button"
-            class="activity-marker transition-transform duration-150 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-slate-900 hover:scale-125"
-            :class="[
-              activityMarkerClass(entry),
-              activityDetailOpen && selectedActivityEntry && selectedActivityEntry.id === entry.id ? 'activity-marker-selected' : ''
-            ]"
-            :title="activityMarkerTitle(entry)"
-            :aria-label="activityMarkerTitle(entry)"
+            class="group relative"
             role="listitem"
-            @click="openActivityDetail(entry, $event)"
-          ></button>
+          >
+            <button
+              type="button"
+              class="activity-marker transition-transform duration-150 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-slate-900 hover:scale-125"
+              :class="[
+                activityMarkerClass(entry),
+                activityDetailOpen && selectedActivityEntry && selectedActivityEntry.id === entry.id ? 'activity-marker-selected' : ''
+              ]"
+              :title="activityMarkerTitle(entry)"
+              :aria-label="activityMarkerTitle(entry)"
+              :aria-describedby="`activity-tooltip-${entry.id}`"
+              @click="openActivityDetail(entry, $event)"
+            ></button>
+            <div
+              :id="`activity-tooltip-${entry.id}`"
+              class="pointer-events-none absolute left-full top-1/2 z-10 hidden -translate-y-1/2 sm:flex sm:max-w-[240px] sm:-translate-x-2 sm:translate-y-0 sm:opacity-0 sm:transition sm:duration-150 sm:ease-out sm:group-hover:translate-x-0 sm:group-hover:opacity-100 sm:group-focus-within:translate-x-0 sm:group-focus-within:opacity-100"
+              role="tooltip"
+            >
+              <div class="relative pl-2">
+                <div class="absolute left-0 top-1/2 h-2.5 w-2.5 -translate-x-1 -translate-y-1/2 rotate-45 border border-slate-800 bg-slate-900 shadow-lg"></div>
+                <div class="relative w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-[11px] font-medium text-slate-100 shadow-xl">
+                  <p class="font-semibold text-slate-100">{{ entry.label || 'Request' }}</p>
+                  <p class="mt-1 flex flex-wrap items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                    <span class="text-slate-200">{{ entry.method ? String(entry.method).toUpperCase() : '' }}</span>
+                    <span class="text-slate-600">•</span>
+                    <span>{{ activityStatusLabel(entry.status).toUpperCase() }}</span>
+                    <template v-if="entry.statusCode">
+                      <span class="text-slate-600">•</span>
+                      <span>HTTP {{ entry.statusCode }}</span>
+                    </template>
+                  </p>
+                  <p class="mt-1 break-all text-[10px] text-slate-400">{{ entry.url }}</p>
+                  <p v-if="entry.detail" class="mt-2 text-[10px] text-slate-500">{{ entry.detail }}</p>
+                  <p v-if="entry.target" class="mt-2 text-[10px] font-semibold uppercase tracking-wide text-slate-500">TARGET: {{ String(entry.target).toUpperCase() }}</p>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div v-if="activityDetailOpen && selectedActivityEntry" class="fixed inset-0 z-50">

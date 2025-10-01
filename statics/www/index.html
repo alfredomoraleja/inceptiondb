@@ -16,8 +16,9 @@
 	<meta name="twitter:description" content="Explore lightning-fast JSON collections, indexes, and metrics with InceptionDB's modern console.">
 	<meta name="twitter:image" content="https://inceptiondb.io/img/og-image.png">
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
-	<link rel="stylesheet" href="/lib/tailwind.min.css">
-	<link rel="stylesheet" href="/theme.css">
+        <link rel="stylesheet" href="/lib/tailwind.min.css">
+        <link rel="stylesheet" href="/theme.css">
+        <link rel="stylesheet" href="/lib/highlight-github-dark.min.css">
 	<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%230f172a'/><text x='50' y='58' font-size='52' text-anchor='middle' fill='white'>IDB</text></svg>">
 	<style>
 		@keyframes activity-marker-enter {
@@ -62,17 +63,25 @@
 			--activity-marker-glow: rgba(52, 211, 153, 0.35);
 		}
 
-		.activity-marker--error {
-			--activity-marker-color: #f87171;
-			--activity-marker-glow: rgba(248, 113, 113, 0.35);
-		}
+                .activity-marker--error {
+                        --activity-marker-color: #f87171;
+                        --activity-marker-glow: rgba(248, 113, 113, 0.35);
+                }
 
-		#activity-modal::backdrop {
-			background-color: rgba(15, 23, 42, 0.75);
-		}
+                #activity-modal::backdrop {
+                        background-color: rgba(15, 23, 42, 0.75);
+                }
+
+                .activity-code .hljs {
+                        background: transparent;
+                        padding: 0;
+                        white-space: pre-wrap;
+                        word-break: break-word;
+                }
 	</style>
-	<script src="/lib/axios.min.js"></script>
-	<script src="/lib/vue.global.prod.js"></script>
+        <script src="/lib/axios.min.js"></script>
+        <script src="/lib/vue.global.prod.js"></script>
+        <script src="/lib/highlight.min.js"></script>
 </head>
 <body class="theme-dark bg-slate-950 text-slate-100 min-h-screen">
 <div id="app">
@@ -128,11 +137,17 @@
 							{{ tab.label }}
 						</button>
 					</div>
-					<pre
-									v-if="activeActivityRequestTabContent"
-									style="height: 300px;"
-									class="max-h-48 overflow-y-auto bg-slate-900 px-3 py-2 text-xs text-slate-200 font-mono whitespace-pre-wrap break-words"
-					>{{ activeActivityRequestTabContent }}</pre>
+                                        <pre
+                                                                v-if="activeActivityRequestTabContent"
+                                                                style="height: 300px;"
+                                                                class="activity-code max-h-48 overflow-y-auto bg-slate-900 px-3 py-2 text-xs text-slate-200 font-mono"
+                                        >
+                                                <code
+                                                                        ref="activityCodeBlock"
+                                                                        :class="[activityRequestLanguageClass, 'block whitespace-pre-wrap break-words']"
+                                                                        v-text="activeActivityRequestTabContent"
+                                                ></code>
+                                        </pre>
 				</div>
 			</div>
 			<div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
@@ -1226,10 +1241,11 @@
 			const activityLog = ref([]);
 			const activityDetailOpen = ref(false);
 			const selectedActivityEntry = ref(null);
-			const activityModal = ref(null);
-			const modalMode = ref('welcome');
-			const modalOpen = ref(false);
-			const selectedActivityRequestTab = ref('http');
+                        const activityModal = ref(null);
+                        const modalMode = ref('welcome');
+                        const modalOpen = ref(false);
+                        const activityCodeBlock = ref(null);
+                        const selectedActivityRequestTab = ref('http');
 			const exportState = reactive({
 				running: false,
 				progress: '',
@@ -2267,36 +2283,78 @@
                                 { id: 'curl', label: 'cURL', builder: buildCurlCommand },
                         ];
 
-			const activityRequestTabEntries = computed(() => {
-				const entry = selectedActivityEntry.value;
-				if (!entry) return [];
-				return activityRequestTabDefinitions
-								.map((tab) => {
-									const content = tab.builder(entry);
-									if (!content || String(content).trim() === '') {
-										return null;
-									}
-									return { id: tab.id, label: tab.label, content };
-								})
-								.filter(Boolean);
-			});
+                        const activityRequestTabEntries = computed(() => {
+                                const entry = selectedActivityEntry.value;
+                                if (!entry) return [];
+                                return activityRequestTabDefinitions
+                                                                .map((tab) => {
+                                                                        const content = tab.builder(entry);
+                                                                        if (!content || String(content).trim() === '') {
+                                                                                return null;
+                                                                        }
+                                                                        return { id: tab.id, label: tab.label, content };
+                                                                })
+                                                                .filter(Boolean);
+                        });
 
-			const activeActivityRequestTabContent = computed(() => {
-				const tabs = activityRequestTabEntries.value;
-				if (!tabs.length) return '';
-				const active = tabs.find((tab) => tab.id === selectedActivityRequestTab.value);
-				return active ? active.content : tabs[0].content;
-			});
+                        const activeActivityRequestTabContent = computed(() => {
+                                const tabs = activityRequestTabEntries.value;
+                                if (!tabs.length) return '';
+                                const active = tabs.find((tab) => tab.id === selectedActivityRequestTab.value);
+                                return active ? active.content : tabs[0].content;
+                        });
 
-			watch(activityRequestTabEntries, (tabs) => {
-				if (!Array.isArray(tabs) || tabs.length === 0) {
-					selectedActivityRequestTab.value = '';
-					return;
-				}
-				if (!tabs.some((tab) => tab.id === selectedActivityRequestTab.value)) {
-					selectedActivityRequestTab.value = tabs[0].id;
-				}
-			});
+                        const activityRequestLanguageClass = computed(() => {
+                                switch (selectedActivityRequestTab.value) {
+                                        case 'http':
+                                                return 'language-http';
+                                        case 'javascript':
+                                                return 'language-javascript';
+                                        case 'golang':
+                                                return 'language-go';
+                                        case 'python':
+                                                return 'language-python';
+                                        case 'php':
+                                                return 'language-php';
+                                        case 'curl':
+                                                return 'language-bash';
+                                        default:
+                                                return 'language-plaintext';
+                                }
+                        });
+
+                        const highlightActivityRequestSnippet = () => {
+                                nextTick(() => {
+                                        const codeEl = activityCodeBlock.value;
+                                        if (
+                                                codeEl &&
+                                                window.hljs &&
+                                                typeof window.hljs.highlightElement === 'function'
+                                        ) {
+                                                window.hljs.highlightElement(codeEl);
+                                        }
+                                });
+                        };
+
+                        watch(activityRequestTabEntries, (tabs) => {
+                                if (!Array.isArray(tabs) || tabs.length === 0) {
+                                        selectedActivityRequestTab.value = '';
+                                        return;
+                                }
+                                if (!tabs.some((tab) => tab.id === selectedActivityRequestTab.value)) {
+                                        selectedActivityRequestTab.value = tabs[0].id;
+                                }
+                        });
+
+                        watch([activeActivityRequestTabContent, selectedActivityRequestTab], () => {
+                                highlightActivityRequestSnippet();
+                        });
+
+                        watch(activityDetailOpen, (open) => {
+                                if (open) {
+                                        highlightActivityRequestSnippet();
+                                }
+                        });
 
 			const showActivityModal = () => {
 				const modalEl = activityModal.value;
@@ -3849,10 +3907,13 @@
 				return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 			};
 
-			onMounted(() => {
-				beginConnectionCheck();
-				window.addEventListener('keydown', handleKeydown);
-				window.addEventListener('hashchange', handleHashChange);
+                        onMounted(() => {
+                                if (window.hljs && typeof window.hljs.configure === 'function') {
+                                        window.hljs.configure({ ignoreUnescapedHTML: true });
+                                }
+                                beginConnectionCheck();
+                                window.addEventListener('keydown', handleKeydown);
+                                window.addEventListener('hashchange', handleHashChange);
 				const initialRoute = currentRouteState();
 				if (
 								initialRoute.collection ||
@@ -3976,12 +4037,14 @@
 				activityMarkerTitle,
 				activityRequestHeaders,
 				activityRequestBody,
-				activityRequestTabEntries,
-				selectedActivityRequestTab,
-				activeActivityRequestTabContent,
-				buildCurlCommand,
-				activityModal,
-				modalMode,
+                                activityRequestTabEntries,
+                                activityRequestLanguageClass,
+                                selectedActivityRequestTab,
+                                activeActivityRequestTabContent,
+                                buildCurlCommand,
+                                activityModal,
+                                activityCodeBlock,
+                                modalMode,
 				openActivityDetail,
 				closeActivityDetail,
 				closeActivityModal,

@@ -2063,6 +2063,73 @@
 				return lines.join(' \\\n');
 			};
 
+                        const buildGoValueLines = (value, indentLevel = 0) => {
+                                const indent = (level) => '\t'.repeat(level);
+                                if (value === null || value === undefined) {
+                                        return [`${indent(indentLevel)}nil`];
+                                }
+                                if (Array.isArray(value)) {
+                                        if (value.length === 0) {
+                                                return [`${indent(indentLevel)}[]interface{}{}`];
+                                        }
+                                        const lines = [`${indent(indentLevel)}[]interface{}{`];
+                                        value.forEach((item) => {
+                                                const itemLines = buildGoValueLines(item, indentLevel + 1);
+                                                const lastIndex = itemLines.length - 1;
+                                                itemLines.forEach((line, index) => {
+                                                        if (index === lastIndex) {
+                                                                lines.push(`${line},`);
+                                                        } else {
+                                                                lines.push(line);
+                                                        }
+                                                });
+                                        });
+                                        lines.push(`${indent(indentLevel)}}`);
+                                        return lines;
+                                }
+                                if (typeof value === 'object') {
+                                        const keys = Object.keys(value);
+                                        if (keys.length === 0) {
+                                                return [`${indent(indentLevel)}map[string]interface{}{}`];
+                                        }
+                                        const lines = [`${indent(indentLevel)}map[string]interface{}{`];
+                                        keys.sort().forEach((key) => {
+                                                const fieldLines = buildGoValueLines(value[key], indentLevel + 1);
+                                                if (fieldLines.length === 1) {
+                                                        lines.push(`${indent(indentLevel + 1)}${JSON.stringify(key)}: ${fieldLines[0].trim()},`);
+                                                } else {
+                                                        const [firstLine, ...restLines] = fieldLines;
+                                                        lines.push(`${indent(indentLevel + 1)}${JSON.stringify(key)}: ${firstLine.trimStart()}`);
+                                                        const lastRestIndex = restLines.length - 1;
+                                                        restLines.forEach((line, index) => {
+                                                                if (index === lastRestIndex) {
+                                                                        lines.push(`${line},`);
+                                                                } else {
+                                                                        lines.push(line);
+                                                                }
+                                                        });
+                                                }
+                                        });
+                                        lines.push(`${indent(indentLevel)}}`);
+                                        return lines;
+                                }
+                                let literal;
+                                switch (typeof value) {
+                                        case 'string':
+                                                literal = JSON.stringify(value);
+                                                break;
+                                        case 'number':
+                                                literal = Number.isFinite(value) ? String(value) : '0';
+                                                break;
+                                        case 'boolean':
+                                                literal = value ? 'true' : 'false';
+                                                break;
+                                        default:
+                                                literal = JSON.stringify(String(value));
+                                }
+                                return [`${indent(indentLevel)}${literal}`];
+                        };
+
                         const buildGoRequest = (entry) => {
                                 if (!entry?.request) return '';
                                 const method = (entry.request.method || '').toUpperCase() || 'GET';
@@ -2079,23 +2146,42 @@
                                 const body = entry.request.body;
 
                                 const goImports = new Set(['"fmt"', '"io"', '"log"', '"net/http"']);
-                                let bodyDeclaration = '';
+                                let bodyDeclarationLines = [];
                                 let bodyReference = 'nil';
 
                                 if (body !== undefined && body !== null && body !== '') {
-                                        goImports.add('"strings"');
-                                        let bodyString = '';
                                         if (typeof body === 'string') {
-                                                bodyString = body;
-                                        } else {
-                                                try {
-                                                        bodyString = JSON.stringify(body, null, 2);
-                                                } catch (error) {
-                                                        bodyString = String(body);
+                                                goImports.add('"strings"');
+                                                let bodyString = body;
+                                                if (bodyString === undefined || bodyString === null) {
+                                                        bodyString = '';
                                                 }
+                                                bodyDeclarationLines.push(`\tpayload := strings.NewReader(${JSON.stringify(bodyString)})`);
+                                                bodyReference = 'payload';
+                                        } else {
+                                                goImports.add('"bytes"');
+                                                goImports.add('"encoding/json"');
+                                                let payloadLines;
+                                                try {
+                                                        payloadLines = buildGoValueLines(body, 2);
+                                                } catch (error) {
+                                                        payloadLines = [`\t\tmap[string]interface{}{}`];
+                                                }
+                                                if (!Array.isArray(payloadLines) || payloadLines.length === 0) {
+                                                        payloadLines = [`\t\tmap[string]interface{}{}`];
+                                                }
+                                                const [firstLine, ...restLines] = payloadLines;
+                                                bodyDeclarationLines.push(`\tpayload := ${firstLine.trimStart()}`);
+                                                restLines.forEach((line) => {
+                                                        bodyDeclarationLines.push(line);
+                                                });
+                                                bodyDeclarationLines.push('\tpayloadBytes, err := json.Marshal(payload)');
+                                                bodyDeclarationLines.push('\tif err != nil {');
+                                                bodyDeclarationLines.push('\t\tlog.Fatal(err)');
+                                                bodyDeclarationLines.push('\t}');
+                                                bodyDeclarationLines.push('\tpayloadReader := bytes.NewReader(payloadBytes)');
+                                                bodyReference = 'payloadReader';
                                         }
-                                        bodyDeclaration = `\tpayload := strings.NewReader(${JSON.stringify(bodyString)})`;
-                                        bodyReference = 'payload';
                                 }
 
                                 const lines = ['package main', '', 'import ('];
@@ -2105,8 +2191,10 @@
                                                 lines.push(`\t${imp}`);
                                         });
                                 lines.push(')', '', 'func main() {', '\tclient := &http.Client{}');
-                                if (bodyDeclaration) {
-                                        lines.push(bodyDeclaration);
+                                if (bodyDeclarationLines.length > 0) {
+                                        bodyDeclarationLines.forEach((line) => {
+                                                lines.push(line);
+                                        });
                                 }
                                 lines.push(
                                         `\treq, err := http.NewRequest(${JSON.stringify(method)}, ${JSON.stringify(absoluteUrl)}, ${bodyReference})`

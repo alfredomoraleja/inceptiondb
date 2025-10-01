@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="h-full">
 <head>
 	<meta charset="utf-8">
 	<title>InceptionDB Console</title>
@@ -18,11 +18,11 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
 	<link rel="stylesheet" href="/lib/tailwind.min.css">
 	<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%230f172a'/><text x='50' y='58' font-size='52' text-anchor='middle' fill='white'>IDB</text></svg>">
-	<style>
-		@keyframes activity-marker-enter {
-			0% {
-				opacity: 0;
-				transform: scale(0.6);
+        <style>
+                @keyframes activity-marker-enter {
+                        0% {
+                                opacity: 0;
+                                transform: scale(0.6);
 			}
 
 			60% {
@@ -64,16 +64,138 @@
 		.activity-marker--error {
 			--activity-marker-color: #f87171;
 			--activity-marker-glow: rgba(248, 113, 113, 0.35);
-		}
+                }
 
-		#activity-modal::backdrop {
-			background-color: rgba(15, 23, 42, 0.75);
-		}
+                #activity-modal::backdrop {
+                        background-color: rgba(15, 23, 42, 0.75);
+                }
+
+                :root:not(.dark) {
+                        color-scheme: light;
+                }
+
+                :root:not(.dark) body {
+                        background-color: #f8fafc;
+                        color: #0f172a;
+                }
+
+                :root:not(.dark) .bg-slate-950,
+                :root:not(.dark) .bg-slate-900 {
+                        background-color: #ffffff !important;
+                }
+
+                :root:not(.dark) .bg-slate-900\/40,
+                :root:not(.dark) .bg-slate-950\/40 {
+                        background-color: rgba(15, 23, 42, 0.04) !important;
+                }
+
+                :root:not(.dark) .bg-slate-900\/60,
+                :root:not(.dark) .bg-slate-950\/60 {
+                        background-color: rgba(15, 23, 42, 0.08) !important;
+                }
+
+                :root:not(.dark) .bg-slate-900\/70,
+                :root:not(.dark) .bg-slate-950\/70 {
+                        background-color: rgba(15, 23, 42, 0.12) !important;
+                }
+
+                :root:not(.dark) .bg-slate-950\/85 {
+                        background-color: rgba(15, 23, 42, 0.18) !important;
+                }
+
+                :root:not(.dark) .bg-slate-800 {
+                        background-color: #f1f5f9 !important;
+                }
+
+                :root:not(.dark) .bg-slate-700 {
+                        background-color: #e2e8f0 !important;
+                }
+
+                :root:not(.dark) .text-slate-100 {
+                        color: #0f172a !important;
+                }
+
+                :root:not(.dark) .text-slate-200,
+                :root:not(.dark) .text-slate-200\/80 {
+                        color: rgba(15, 23, 42, 0.85) !important;
+                }
+
+                :root:not(.dark) .text-slate-300 {
+                        color: #334155 !important;
+                }
+
+                :root:not(.dark) .text-slate-400 {
+                        color: #475569 !important;
+                }
+
+                :root:not(.dark) .text-slate-500 {
+                        color: #64748b !important;
+                }
+
+                :root:not(.dark) .text-slate-600 {
+                        color: #475569 !important;
+                }
+
+                :root:not(.dark) .text-sky-300 {
+                        color: #0369a1 !important;
+                }
+
+                :root:not(.dark) .text-rose-300 {
+                        color: #be123c !important;
+                }
+
+                :root:not(.dark) .text-emerald-300,
+                :root:not(.dark) .text-emerald-300\/90 {
+                        color: #047857 !important;
+                }
+
+                :root:not(.dark) .border-slate-700,
+                :root:not(.dark) .border-slate-700\/80,
+                :root:not(.dark) .border-slate-800,
+                :root:not(.dark) .border-slate-800\/70,
+                :root:not(.dark) .border-slate-800\/80,
+                :root:not(.dark) .divide-slate-800,
+                :root:not(.dark) .border-slate-500\/30 {
+                        border-color: rgba(148, 163, 184, 0.35) !important;
+                }
+
+                :root:not(.dark) .border-slate-700:hover,
+                :root:not(.dark) .border-slate-800:hover {
+                        border-color: rgba(148, 163, 184, 0.5) !important;
+                }
+
+                :root:not(.dark) .shadow-inner {
+                        box-shadow: inset 0 1px 2px 0 rgba(15, 23, 42, 0.05) !important;
+                }
 	</style>
-	<script src="/lib/axios.min.js"></script>
-	<script src="/lib/vue.global.prod.js"></script>
+        <script>
+                (function () {
+                        if (typeof window.matchMedia !== 'function') {
+                                document.documentElement.classList.remove('dark');
+                                document.documentElement.style.colorScheme = 'light';
+                                return;
+                        }
+
+                        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+
+                        const applyTheme = (isDark) => {
+                                document.documentElement.classList.toggle('dark', isDark);
+                                document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+                        };
+
+                        applyTheme(prefersDark.matches);
+
+                        if (typeof prefersDark.addEventListener === 'function') {
+                                prefersDark.addEventListener('change', (event) => applyTheme(event.matches));
+                        } else if (typeof prefersDark.addListener === 'function') {
+                                prefersDark.addListener((event) => applyTheme(event.matches));
+                        }
+                })();
+        </script>
+        <script src="/lib/axios.min.js"></script>
+        <script src="/lib/vue.global.prod.js"></script>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen">
+<body class="min-h-screen bg-slate-50 text-slate-900 transition-colors duration-300 dark:bg-slate-950 dark:text-slate-100">
 <div id="app">
 	<dialog
 					id="activity-modal"

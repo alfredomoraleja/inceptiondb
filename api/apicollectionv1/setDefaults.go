@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
+
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/service"
@@ -33,7 +36,7 @@ func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 
 	defaults := col.Defaults
 
-	err = json.NewDecoder(r.Body).Decode(&defaults)
+	err = jsonv2.UnmarshalDecode(jsontext.NewDecoder(r.Body), &defaults)
 	if err != nil {
 		return err // todo: handle/wrap this properly
 	}

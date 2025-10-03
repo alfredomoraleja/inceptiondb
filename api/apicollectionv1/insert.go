@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
+
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/service"
@@ -37,12 +40,12 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		return err // todo: handle/wrap this properly
 	}
 
-	jsonReader := json.NewDecoder(r.Body)
+	jsonReader := jsontext.NewDecoder(r.Body)
 	jsonWriter := json.NewEncoder(w)
 
 	for i := 0; true; i++ {
 		item := map[string]any{}
-		err := jsonReader.Decode(&item)
+		err := jsonv2.UnmarshalDecode(jsonReader, &item)
 		if err == io.EOF {
 			if i == 0 {
 				w.WriteHeader(http.StatusNoContent)

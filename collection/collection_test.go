@@ -16,6 +16,14 @@ import (
 	"github.com/google/uuid"
 )
 
+func asIndexEntries(indexes map[string]*collectionIndex) []indexEntry {
+	entries := make([]indexEntry, 0, len(indexes))
+	for name, idx := range indexes {
+		entries = append(entries, indexEntry{name: name, index: idx})
+	}
+	return entries
+}
+
 func TestInsert(t *testing.T) {
 	Environment(func(filename string) {
 
@@ -449,7 +457,7 @@ func TestIndexInsert_Rollback(t *testing.T) {
 
 	row := &Row{}
 
-	indexInsert(indexes, row)
+	indexInsert(asIndexEntries(indexes), row)
 
 	AssertEqual(removes, adds)
 	AssertEqual(len(removes), 2)
@@ -469,13 +477,13 @@ func TestIndexInsert_Rollback_BlackBox(t *testing.T) {
 		Payload: []byte(`{"id":"my-id"}`),
 	}
 
-	err1 := indexInsert(indexes, row)
+	err1 := indexInsert(asIndexEntries(indexes), row)
 	AssertNil(err1)
 
-	err2 := indexInsert(indexes, row)
+	err2 := indexInsert(asIndexEntries(indexes), row)
 	AssertNotNil(err2)
 
-	err3 := indexInsert(indexes, row)
+	err3 := indexInsert(asIndexEntries(indexes), row)
 	AssertNotNil(err3)
 
 }

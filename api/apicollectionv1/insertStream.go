@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
+
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/service"
@@ -36,13 +39,13 @@ func insertStream(ctx context.Context, w http.ResponseWriter, r *http.Request) e
 	FullDuplex(w, func(w io.Writer) {
 
 		jsonWriter := json.NewEncoder(w)
-		jsonReader := json.NewDecoder(r.Body)
+		jsonReader := jsontext.NewDecoder(r.Body)
 
 		// w.WriteHeader(http.StatusCreated)
 
 		for {
 			item := map[string]interface{}{}
-			err := jsonReader.Decode(&item)
+			err := jsonv2.UnmarshalDecode(jsonReader, &item)
 			if err == io.EOF {
 				// w.WriteHeader(http.StatusCreated)
 				return

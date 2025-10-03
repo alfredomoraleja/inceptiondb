@@ -1,12 +1,15 @@
 package database
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fulldump/inceptiondb/collection"
@@ -18,15 +21,21 @@ const (
 	StatusClosing   = "closing"
 )
 
+var (
+	ErrCollectionExists   = errors.New("collection already exists")
+	ErrCollectionNotFound = errors.New("collection not found")
+)
+
 type Config struct {
 	Dir string
 }
 
 type Database struct {
-	Config      *Config
-	status      string
-	Collections map[string]*collection.Collection
-	exit        chan struct{}
+	Config        *Config
+	status        string
+	Collections   map[string]*collection.Collection
+	collectionsMu sync.RWMutex
+	exit          chan struct{}
 }
 
 func NewDatabase(config *Config) *Database { // todo: return error?
@@ -46,9 +55,11 @@ func (db *Database) GetStatus() string {
 
 func (db *Database) CreateCollection(name string) (*collection.Collection, error) {
 
+	db.collectionsMu.RLock()
 	_, exists := db.Collections[name]
+	db.collectionsMu.RUnlock()
 	if exists {
-		return nil, fmt.Errorf("collection '%s' already exists", name)
+		return nil, ErrCollectionExists
 	}
 
 	filename := path.Join(db.Config.Dir, name)
@@ -57,28 +68,60 @@ func (db *Database) CreateCollection(name string) (*collection.Collection, error
 		return nil, err
 	}
 
+	db.collectionsMu.Lock()
+	if _, exists := db.Collections[name]; exists {
+		db.collectionsMu.Unlock()
+		col.Close()
+		return nil, ErrCollectionExists
+	}
 	db.Collections[name] = col
+	db.collectionsMu.Unlock()
 
 	return col, nil
 }
 
+func (db *Database) GetCollection(name string) (*collection.Collection, bool) {
+	db.collectionsMu.RLock()
+	defer db.collectionsMu.RUnlock()
+
+	col, ok := db.Collections[name]
+	return col, ok
+}
+
+func (db *Database) ListCollections() map[string]*collection.Collection {
+	db.collectionsMu.RLock()
+	defer db.collectionsMu.RUnlock()
+
+	result := make(map[string]*collection.Collection, len(db.Collections))
+	for name, col := range db.Collections {
+		result[name] = col
+	}
+
+	return result
+}
+
 func (db *Database) DropCollection(name string) error { // TODO: rename drop?
 
+	db.collectionsMu.Lock()
 	col, exists := db.Collections[name]
 	if !exists {
-		return fmt.Errorf("collection '%s' not found", name)
+		db.collectionsMu.Unlock()
+		return ErrCollectionNotFound
+	}
+	delete(db.Collections, name)
+	db.collectionsMu.Unlock()
+
+	if err := col.Close(); err != nil {
+		return fmt.Errorf("close: %w", err)
 	}
 
 	filename := path.Join(db.Config.Dir, name)
 
-	err := os.Remove(filename)
-	if err != nil {
+	if err := os.Remove(filename); err != nil {
 		return err // TODO: wrap?
 	}
 
-	delete(db.Collections, name) // TODO: protect section! not threadsafe
-
-	return col.Close()
+	return nil
 }
 
 func (db *Database) Load() error {
@@ -89,34 +132,70 @@ func (db *Database) Load() error {
 	if err != nil {
 		return err
 	}
-	err = filepath.WalkDir(dir, func(filename string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	filenames := make([]string, 0)
+	err = filepath.WalkDir(dir, func(filename string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if d.IsDir() {
 			return nil
 		}
 
-		name := filename
-		name = strings.TrimPrefix(name, dir)
-		name = strings.TrimPrefix(name, "/")
-
-		t0 := time.Now()
-		col, err := collection.OpenCollection(filename)
-		if err != nil {
-			fmt.Printf("ERROR: open collection '%s': %s\n", filename, err.Error()) // todo: move to logger
-			return err
-		}
-		fmt.Println(name, len(col.Rows), time.Since(t0)) // todo: move to logger
-
-		db.Collections[name] = col
-
+		filenames = append(filenames, filename)
 		return nil
 	})
 
 	if err != nil {
 		db.status = StatusClosing
 		return err
+	}
+
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	var firstErr error
+	var firstErrMu sync.Mutex
+
+	for _, filename := range filenames {
+		filename := filename
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			name := strings.TrimPrefix(filename, dir)
+			name = strings.TrimPrefix(name, string(os.PathSeparator))
+
+			t0 := time.Now()
+			col, err := collection.OpenCollection(filename)
+			if err != nil {
+				fmt.Printf("ERROR: open collection '%s': %s\n", filename, err.Error()) // todo: move to logger
+				firstErrMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				firstErrMu.Unlock()
+				return
+			}
+			fmt.Println(name, len(col.Rows), time.Since(t0)) // todo: move to logger
+
+			db.collectionsMu.Lock()
+			db.Collections[name] = col
+			db.collectionsMu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		db.status = StatusClosing
+		return firstErr
 	}
 
 	fmt.Println("Ready")
@@ -143,7 +222,8 @@ func (db *Database) Stop() error {
 	db.status = StatusClosing
 
 	var lastErr error
-	for name, col := range db.Collections {
+	collections := db.ListCollections()
+	for name, col := range collections {
 		fmt.Printf("Closing '%s'...\n", name)
 		err := col.Close()
 		if err != nil {

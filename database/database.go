@@ -6,7 +6,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fulldump/inceptiondb/collection"
@@ -89,6 +91,13 @@ func (db *Database) Load() error {
 	if err != nil {
 		return err
 	}
+	type fileEntry struct {
+		filename string
+		name     string
+	}
+
+	var entries []fileEntry
+
 	err = filepath.WalkDir(dir, func(filename string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -101,22 +110,59 @@ func (db *Database) Load() error {
 		name = strings.TrimPrefix(name, dir)
 		name = strings.TrimPrefix(name, "/")
 
-		t0 := time.Now()
-		col, err := collection.OpenCollection(filename)
-		if err != nil {
-			fmt.Printf("ERROR: open collection '%s': %s\n", filename, err.Error()) // todo: move to logger
-			return err
-		}
-		fmt.Println(name, len(col.Rows), time.Since(t0)) // todo: move to logger
-
-		db.Collections[name] = col
-
+		entries = append(entries, fileEntry{filename: filename, name: name})
 		return nil
 	})
 
 	if err != nil {
 		db.status = StatusClosing
 		return err
+	}
+
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		errCh   = make(chan error, len(entries))
+		workers = runtime.GOMAXPROCS(0)
+		sem     = make(chan struct{}, workers)
+	)
+
+	for _, entry := range entries {
+		entry := entry
+		wg.Add(1)
+		go func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			defer wg.Done()
+
+			t0 := time.Now()
+			col, err := collection.OpenCollection(entry.filename)
+			if err != nil {
+				fmt.Printf("ERROR: open collection '%s': %s\n", entry.filename, err.Error()) // todo: move to logger
+				errCh <- err
+				return
+			}
+			fmt.Println(entry.name, len(col.Rows), time.Since(t0)) // todo: move to logger
+
+			mu.Lock()
+			db.Collections[entry.name] = col
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var loadErr error
+	for err := range errCh {
+		if loadErr == nil {
+			loadErr = err
+		}
+	}
+
+	if loadErr != nil {
+		db.status = StatusClosing
+		return loadErr
 	}
 
 	fmt.Println("Ready")

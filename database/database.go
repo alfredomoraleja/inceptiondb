@@ -6,7 +6,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fulldump/inceptiondb/collection"
@@ -89,6 +91,13 @@ func (db *Database) Load() error {
 	if err != nil {
 		return err
 	}
+
+	type loadTask struct {
+		filename string
+		name     string
+	}
+
+	tasks := []loadTask{}
 	err = filepath.WalkDir(dir, func(filename string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -97,26 +106,79 @@ func (db *Database) Load() error {
 			return nil
 		}
 
-		name := filename
-		name = strings.TrimPrefix(name, dir)
+		name := strings.TrimPrefix(filename, dir)
 		name = strings.TrimPrefix(name, "/")
 
-		t0 := time.Now()
-		col, err := collection.OpenCollection(filename)
-		if err != nil {
-			fmt.Printf("ERROR: open collection '%s': %s\n", filename, err.Error()) // todo: move to logger
-			return err
-		}
-		fmt.Println(name, len(col.Rows), time.Since(t0)) // todo: move to logger
-
-		db.Collections[name] = col
-
+		tasks = append(tasks, loadTask{filename: filename, name: name})
 		return nil
 	})
-
 	if err != nil {
 		db.status = StatusClosing
 		return err
+	}
+
+	workerCount := runtime.GOMAXPROCS(0)
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if len(tasks) < workerCount {
+		workerCount = len(tasks)
+	}
+
+	type loadResult struct {
+		task       loadTask
+		collection *collection.Collection
+		err        error
+		rows       int
+		duration   time.Duration
+	}
+
+	jobs := make(chan loadTask)
+	results := make(chan loadResult)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range jobs {
+				t0 := time.Now()
+				col, err := collection.OpenCollection(task.filename)
+				if err != nil {
+					results <- loadResult{task: task, err: err}
+					continue
+				}
+				results <- loadResult{task: task, collection: col, rows: len(col.Rows), duration: time.Since(t0)}
+			}
+		}()
+	}
+
+	go func() {
+		for _, task := range tasks {
+			jobs <- task
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	for res := range results {
+		if res.err != nil {
+			fmt.Printf("ERROR: open collection '%s': %s\n", res.task.filename, res.err.Error()) // todo: move to logger
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			continue
+		}
+
+		fmt.Println(res.task.name, res.rows, res.duration) // todo: move to logger
+		db.Collections[res.task.name] = res.collection
+	}
+
+	if firstErr != nil {
+		db.status = StatusClosing
+		return firstErr
 	}
 
 	fmt.Println("Ready")

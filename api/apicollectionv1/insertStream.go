@@ -2,13 +2,16 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	stdjson "encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 
 	"github.com/fulldump/box"
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 
 	"github.com/fulldump/inceptiondb/service"
 )
@@ -35,15 +38,15 @@ func insertStream(ctx context.Context, w http.ResponseWriter, r *http.Request) e
 
 	FullDuplex(w, func(w io.Writer) {
 
-		jsonWriter := json.NewEncoder(w)
-		jsonReader := json.NewDecoder(r.Body)
+		jsonWriter := stdjson.NewEncoder(w)
+		jsonReader := jsontext.NewDecoder(r.Body)
 
 		// w.WriteHeader(http.StatusCreated)
 
 		for {
 			item := map[string]interface{}{}
-			err := jsonReader.Decode(&item)
-			if err == io.EOF {
+			err := jsonv2.UnmarshalDecode(jsonReader, &item)
+			if errors.Is(err, io.EOF) {
 				// w.WriteHeader(http.StatusCreated)
 				return
 			}

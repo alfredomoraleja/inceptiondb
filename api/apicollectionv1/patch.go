@@ -2,12 +2,13 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	stdjson "encoding/json"
 	"io"
 	"net/http"
 
 	"github.com/SierraSoftworks/connor"
 	"github.com/fulldump/box"
+	jsonv2 "github.com/go-json-experiment/json"
 
 	"github.com/fulldump/inceptiondb/collection"
 )
@@ -27,12 +28,12 @@ func patch(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 	}
 
 	patch := struct {
-		Filter map[string]interface{}
-		Patch  interface{}
+		Filter map[string]interface{} `json:"filter"`
+		Patch  interface{}            `json:"patch"`
 	}{}
-	json.Unmarshal(requestBody, &patch) // TODO: handle err
+	jsonv2.Unmarshal(requestBody, &patch) // TODO: handle err
 
-	e := json.NewEncoder(w)
+	e := stdjson.NewEncoder(w)
 
 	traverse(requestBody, col, func(row *collection.Row) bool {
 
@@ -43,7 +44,7 @@ func patch(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		if hasFilter {
 
 			rowData := map[string]interface{}{}
-			json.Unmarshal(row.Payload, &rowData) // todo: handle error here?
+			jsonv2.Unmarshal(row.Payload, &rowData) // todo: handle error here?
 
 			match, err := connor.Match(patch.Filter, rowData)
 			if err != nil {

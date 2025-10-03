@@ -1,7 +1,7 @@
 package service
 
 import (
-	"encoding/json"
+	stdjson "encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/fulldump/apitest"
+	jsonv2 "github.com/go-json-experiment/json"
 )
 
 // Save generates the MD of the tests.
@@ -101,12 +102,12 @@ func formatJSON(body string) string {
 
 	var i interface{}
 
-	err := json.Unmarshal([]byte(body), &i)
+	err := jsonv2.Unmarshal([]byte(body), &i)
 	if nil != err {
 		return body
 	}
 
-	bytes, err := json.MarshalIndent(i, "", "    ")
+	bytes, err := stdjson.MarshalIndent(i, "", "    ")
 	if nil != err {
 		return body
 	}

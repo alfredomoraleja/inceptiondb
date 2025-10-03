@@ -2,12 +2,12 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/fulldump/box"
+	jsonv2 "github.com/go-json-experiment/json"
 
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/service"
@@ -27,13 +27,13 @@ func createIndex(ctx context.Context, r *http.Request) (*listIndexesItem, error)
 	}
 
 	input := struct {
-		Name string
-		Type string
+		Name string `json:"name"`
+		Type string `json:"type"`
 	}{
 		"",
 		"", // todo: put default index here (if any)
 	}
-	err = json.Unmarshal(requestBody, &input)
+	err = jsonv2.Unmarshal(requestBody, &input)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func createIndex(ctx context.Context, r *http.Request) (*listIndexesItem, error)
 		return nil, fmt.Errorf("unexpected type '%s' instead of [map|btree]", input.Type)
 	}
 
-	err = json.Unmarshal(requestBody, &options)
+	err = jsonv2.Unmarshal(requestBody, &options)
 	if err != nil {
 		return nil, err
 	}

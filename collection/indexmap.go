@@ -1,9 +1,10 @@
 package collection
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
+
+	jsonv2 "github.com/go-json-experiment/json"
 )
 
 // IndexMap should be an interface to allow multiple kinds and implementations
@@ -25,7 +26,7 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 
 	item := map[string]interface{}{}
 
-	err := json.Unmarshal(row.Payload, &item)
+	err := jsonv2.Unmarshal(row.Payload, &item)
 	if err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
@@ -58,7 +59,7 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 func (i *IndexMap) AddRow(row *Row) error {
 
 	item := map[string]interface{}{}
-	err := json.Unmarshal(row.Payload, &item)
+	err := jsonv2.Unmarshal(row.Payload, &item)
 	if err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
@@ -116,7 +117,7 @@ type IndexMapTraverse struct {
 func (i *IndexMap) Traverse(optionsData []byte, f func(row *Row) bool) {
 
 	options := &IndexMapTraverse{}
-	json.Unmarshal(optionsData, options) // todo: handle error
+	jsonv2.Unmarshal(optionsData, options) // todo: handle error
 
 	i.RWmutex.RLock()
 	row, ok := i.Entries[options.Value]

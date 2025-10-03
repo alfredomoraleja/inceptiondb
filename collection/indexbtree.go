@@ -1,11 +1,11 @@
 package collection
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
 
+	jsonv2 "github.com/go-json-experiment/json"
 	"github.com/google/btree"
 )
 
@@ -19,7 +19,7 @@ func (b *IndexBtree) RemoveRow(r *Row) error {
 	// TODO: duplicated code:
 	values := []interface{}{}
 	data := map[string]interface{}{}
-	json.Unmarshal(r.Payload, &data)
+	jsonv2.Unmarshal(r.Payload, &data)
 
 	for _, field := range b.Options.Fields {
 		values = append(values, data[field])
@@ -105,7 +105,7 @@ func NewIndexBTree(options *IndexBTreeOptions) *IndexBtree {
 func (b *IndexBtree) AddRow(r *Row) error {
 	var values []interface{}
 	data := map[string]interface{}{}
-	json.Unmarshal(r.Payload, &data)
+	jsonv2.Unmarshal(r.Payload, &data)
 
 	for _, field := range b.Options.Fields {
 		field = strings.TrimPrefix(field, "-")
@@ -144,7 +144,7 @@ func (b *IndexBtree) AddRow(r *Row) error {
 func (b *IndexBtree) Traverse(optionsData []byte, f func(*Row) bool) {
 
 	options := &IndexBtreeTraverse{}
-	json.Unmarshal(optionsData, options) // todo: handle error
+	jsonv2.Unmarshal(optionsData, options) // todo: handle error
 
 	iterator := func(r *RowOrdered) bool {
 		return f(r.Row)

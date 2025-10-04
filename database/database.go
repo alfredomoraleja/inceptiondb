@@ -6,7 +6,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fulldump/inceptiondb/collection"
@@ -89,6 +91,13 @@ func (db *Database) Load() error {
 	if err != nil {
 		return err
 	}
+
+	type loadJob struct {
+		filename string
+		name     string
+	}
+
+	jobs := make([]loadJob, 0)
 	err = filepath.WalkDir(dir, func(filename string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -97,26 +106,79 @@ func (db *Database) Load() error {
 			return nil
 		}
 
-		name := filename
-		name = strings.TrimPrefix(name, dir)
+		name := strings.TrimPrefix(filename, dir)
 		name = strings.TrimPrefix(name, "/")
 
-		t0 := time.Now()
-		col, err := collection.OpenCollection(filename)
-		if err != nil {
-			fmt.Printf("ERROR: open collection '%s': %s\n", filename, err.Error()) // todo: move to logger
-			return err
-		}
-		fmt.Println(name, len(col.Rows), time.Since(t0)) // todo: move to logger
-
-		db.Collections[name] = col
-
+		jobs = append(jobs, loadJob{filename: filename, name: name})
 		return nil
 	})
 
 	if err != nil {
 		db.status = StatusClosing
 		return err
+	}
+
+	type loadResult struct {
+		job      loadJob
+		col      *collection.Collection
+		duration time.Duration
+		err      error
+	}
+
+	workerCount := runtime.NumCPU()
+	if workerCount < 1 {
+		workerCount = 1
+	}
+
+	jobsCh := make(chan loadJob)
+	resultsCh := make(chan loadResult, len(jobs))
+	var workers sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range jobsCh {
+				start := time.Now()
+				col, err := collection.OpenCollection(job.filename)
+				resultsCh <- loadResult{
+					job:      job,
+					col:      col,
+					duration: time.Since(start),
+					err:      err,
+				}
+			}
+		}()
+	}
+
+	go func() {
+		workers.Wait()
+		close(resultsCh)
+	}()
+
+	for _, job := range jobs {
+		jobsCh <- job
+	}
+	close(jobsCh)
+
+	var firstErr error
+	for result := range resultsCh {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			fmt.Printf("ERROR: open collection '%s': %s\n", result.job.filename, result.err.Error())
+			continue
+		}
+
+		fmt.Println(result.job.name, len(result.col.Rows), result.duration) // todo: move to logger
+
+		db.Collections[result.job.name] = result.col
+	}
+
+	if firstErr != nil {
+		db.status = StatusClosing
+		return firstErr
 	}
 
 	fmt.Println("Ready")

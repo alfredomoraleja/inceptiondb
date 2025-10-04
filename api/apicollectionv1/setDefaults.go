@@ -2,12 +2,14 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 
 	"github.com/fulldump/box"
 
+	stdjson "encoding/json"
 	"github.com/fulldump/inceptiondb/service"
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 )
 
 type setDefaultsInput map[string]any
@@ -33,7 +35,8 @@ func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 
 	defaults := col.Defaults
 
-	err = json.NewDecoder(r.Body).Decode(&defaults)
+	decoder := jsontext.NewDecoder(r.Body)
+	err = jsonv2.UnmarshalDecode(decoder, &defaults)
 	if err != nil {
 		return err // todo: handle/wrap this properly
 	}
@@ -53,7 +56,7 @@ func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 
-	err = json.NewEncoder(w).Encode(col.Defaults)
+	err = stdjson.NewEncoder(w).Encode(col.Defaults)
 	if err != nil {
 		return err // todo: handle/wrap this properly
 	}

@@ -1,11 +1,13 @@
 package service
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"path"
+
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/database"
@@ -71,12 +73,12 @@ func (s *Service) Insert(name string, data io.Reader) error {
 		return ErrorCollectionNotFound
 	}
 
-	jsonReader := json.NewDecoder(data)
+	decoder := jsontext.NewDecoder(data)
 
 	for {
 		item := map[string]interface{}{}
-		err := jsonReader.Decode(&item)
-		if err == io.EOF {
+		err := jsonv2.UnmarshalDecode(decoder, &item)
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {

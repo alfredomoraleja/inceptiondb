@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,7 +10,10 @@ import (
 
 	"github.com/fulldump/box"
 
+	stdjson "encoding/json"
 	"github.com/fulldump/inceptiondb/service"
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 )
 
 // how to try with curl:
@@ -35,15 +38,15 @@ func insertStream(ctx context.Context, w http.ResponseWriter, r *http.Request) e
 
 	FullDuplex(w, func(w io.Writer) {
 
-		jsonWriter := json.NewEncoder(w)
-		jsonReader := json.NewDecoder(r.Body)
+		jsonWriter := stdjson.NewEncoder(w)
+		decoder := jsontext.NewDecoder(r.Body)
 
 		// w.WriteHeader(http.StatusCreated)
 
 		for {
 			item := map[string]interface{}{}
-			err := jsonReader.Decode(&item)
-			if err == io.EOF {
+			err := jsonv2.UnmarshalDecode(decoder, &item)
+			if errors.Is(err, io.EOF) {
 				// w.WriteHeader(http.StatusCreated)
 				return
 			}

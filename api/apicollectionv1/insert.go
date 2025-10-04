@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +10,8 @@ import (
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/service"
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 )
 
 func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -37,13 +39,12 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		return err // todo: handle/wrap this properly
 	}
 
-	jsonReader := json.NewDecoder(r.Body)
-	jsonWriter := json.NewEncoder(w)
+	decoder := jsontext.NewDecoder(r.Body)
 
 	for i := 0; true; i++ {
 		item := map[string]any{}
-		err := jsonReader.Decode(&item)
-		if err == io.EOF {
+		err := jsonv2.UnmarshalDecode(decoder, &item)
+		if errors.Is(err, io.EOF) {
 			if i == 0 {
 				w.WriteHeader(http.StatusNoContent)
 			}
@@ -69,7 +70,8 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		if i == 0 {
 			w.WriteHeader(http.StatusCreated)
 		}
-		jsonWriter.Encode(row.Payload)
+		w.Write(row.Payload)
+		w.Write([]byte("\n"))
 	}
 
 	return nil

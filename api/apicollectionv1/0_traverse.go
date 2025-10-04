@@ -1,29 +1,29 @@
 package apicollectionv1
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/SierraSoftworks/connor"
 
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/utils"
+	jsonv2 "github.com/go-json-experiment/json"
 )
 
 func traverse(requestBody []byte, col *collection.Collection, f func(row *collection.Row) bool) error {
 
 	options := &struct {
-		Index  *string
-		Filter map[string]interface{}
-		Skip   int64
-		Limit  int64
+		Index  *string                `json:"index"`
+		Filter map[string]interface{} `json:"filter"`
+		Skip   int64                  `json:"skip"`
+		Limit  int64                  `json:"limit"`
 	}{
 		Index:  nil,
 		Filter: nil,
 		Skip:   0,
 		Limit:  1,
 	}
-	err := json.Unmarshal(requestBody, &options)
+	err := jsonv2.Unmarshal(requestBody, &options)
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func traverse(requestBody []byte, col *collection.Collection, f func(row *collec
 
 		if hasFilter {
 			rowData := map[string]interface{}{}
-			json.Unmarshal(r.Payload, &rowData) // todo: handle error here?
+			jsonv2.Unmarshal(r.Payload, &rowData) // todo: handle error here?
 
 			match, err := connor.Match(options.Filter, rowData)
 			if err != nil {

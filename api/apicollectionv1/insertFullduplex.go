@@ -2,14 +2,17 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/fulldump/box"
 
+	stdjson "encoding/json"
 	"github.com/fulldump/inceptiondb/service"
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 )
 
 func insertFullduplex(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -30,8 +33,8 @@ func insertFullduplex(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return err // todo: handle/wrap this properly
 	}
 
-	jsonReader := json.NewDecoder(r.Body)
-	jsonWriter := json.NewEncoder(w)
+	decoder := jsontext.NewDecoder(r.Body)
+	jsonWriter := stdjson.NewEncoder(w)
 
 	flusher, ok := w.(http.Flusher)
 	_ = flusher
@@ -49,8 +52,8 @@ func insertFullduplex(ctx context.Context, w http.ResponseWriter, r *http.Reques
 
 	for {
 		item := map[string]interface{}{}
-		err := jsonReader.Decode(&item)
-		if err == io.EOF {
+		err := jsonv2.UnmarshalDecode(decoder, &item)
+		if errors.Is(err, io.EOF) {
 			// w.WriteHeader(http.StatusCreated)
 			return nil
 		}

@@ -2,13 +2,13 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/collection"
+	jsonv2 "github.com/go-json-experiment/json"
 )
 
 func find(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -19,9 +19,9 @@ func find(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 	}
 
 	input := struct {
-		Index *string
+		Index *string `json:"index"`
 	}{}
-	err = json.Unmarshal(requestBody, &input)
+	err = jsonv2.Unmarshal(requestBody, &input)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package collection
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -216,27 +217,73 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		Payload:   payload,
 	}
 
-	if err := c.persistCommand(command); err != nil {
+	if err := c.persistCommand(command, true); err != nil {
 		return nil, err
 	}
 
 	return row, nil
 }
 
-func (c *Collection) persistCommand(command *Command) error {
+const persistFlushThreshold = 256 * 1024
+
+type commandEncoder struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+var commandEncoderPool = sync.Pool{
+	New: func() any {
+		buf := bytes.NewBuffer(make([]byte, 0, 4096))
+		enc := json.NewEncoder(buf)
+		enc.SetEscapeHTML(false)
+		return &commandEncoder{buf: buf, enc: enc}
+	},
+}
+
+func (c *Collection) persistCommand(command *Command, forceFlush bool) error {
+	ce := commandEncoderPool.Get().(*commandEncoder)
+	ce.buf.Reset()
+
+	if err := ce.enc.Encode(command); err != nil {
+		commandEncoderPool.Put(ce)
+		return fmt.Errorf("json encode command: %w", err)
+	}
+
+	encoded := ce.buf.Bytes()
+
 	c.persistMu.Lock()
 	defer c.persistMu.Unlock()
+	defer func() {
+		ce.buf.Reset()
+		commandEncoderPool.Put(ce)
+	}()
 
 	if c.buffer == nil {
 		return fmt.Errorf("collection is closed")
 	}
 
-	if err := json.NewEncoder(c.buffer).Encode(command); err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if forceFlush {
+		if c.buffer.Buffered() > 0 {
+			if err := c.buffer.Flush(); err != nil {
+				return fmt.Errorf("flush buffer: %w", err)
+			}
+		}
+
+		if _, err := c.file.Write(encoded); err != nil {
+			return fmt.Errorf("write command: %w", err)
+		}
+
+		return nil
 	}
 
-	if err := c.buffer.Flush(); err != nil {
-		return fmt.Errorf("flush buffer: %w", err)
+	if _, err := c.buffer.Write(encoded); err != nil {
+		return fmt.Errorf("write command: %w", err)
+	}
+
+	if c.buffer.Buffered() >= persistFlushThreshold {
+		if err := c.buffer.Flush(); err != nil {
+			return fmt.Errorf("flush buffer: %w", err)
+		}
 	}
 
 	return nil
@@ -305,7 +352,7 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 		Payload:   payload,
 	}
 
-	if err := c.persistCommand(command); err != nil {
+	if err := c.persistCommand(command, true); err != nil {
 		return err
 	}
 
@@ -371,7 +418,7 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		Payload:   payload,
 	}
 
-	if err := c.persistCommand(command); err != nil {
+	if err := c.persistCommand(command, true); err != nil {
 		return err
 	}
 
@@ -474,7 +521,7 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 		Payload:   payload,
 	}
 
-	if err := c.persistCommand(command); err != nil {
+	if err := c.persistCommand(command, true); err != nil {
 		return err
 	}
 
@@ -539,7 +586,7 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		Payload:   payload,
 	}
 
-	if err := c.persistCommand(command); err != nil {
+	if err := c.persistCommand(command, true); err != nil {
 		return err
 	}
 
@@ -618,7 +665,7 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		Payload:   payload,
 	}
 
-	if err := c.persistCommand(command); err != nil {
+	if err := c.persistCommand(command, true); err != nil {
 		return err
 	}
 

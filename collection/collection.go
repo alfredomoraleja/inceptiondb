@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,10 +21,11 @@ type Collection struct {
 	file      *os.File
 	Rows      []*Row
 	rowsMutex *sync.Mutex
+	fileMu    *sync.RWMutex
 	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
-	// buffer   *bufio.Writer // TODO: use write buffer to improve performance (x3 in tests)
-	Defaults map[string]any
-	Count    int64
+	Defaults  map[string]any
+	Count     int64
+	offset    int64
 }
 
 type collectionIndex struct {
@@ -49,6 +51,7 @@ func OpenCollection(filename string) (*Collection, error) {
 	collection := &Collection{
 		Rows:      []*Row{},
 		rowsMutex: &sync.Mutex{},
+		fileMu:    &sync.RWMutex{},
 		Filename:  filename,
 		Indexes:   map[string]*collectionIndex{},
 	}
@@ -129,12 +132,18 @@ func OpenCollection(filename string) (*Collection, error) {
 		}
 	}
 
-	// Open file for append only
+	// Open file for append-only use
 	// todo: investigate O_SYNC
-	collection.file, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+	collection.file, err = os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
+
+	info, err := collection.file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat file: %w", err)
+	}
+	collection.offset = info.Size()
 
 	return collection, nil
 }
@@ -212,9 +221,8 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return nil, fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return nil, err
 	}
 
 	return row, nil
@@ -283,12 +291,7 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 // IndexMap create a unique index with a name
@@ -350,12 +353,7 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 func indexInsert(indexes map[string]*collectionIndex, row *Row) (err error) {
@@ -454,13 +452,7 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		// TODO: panic?
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 func (c *Collection) Patch(row *Row, patch interface{}) error {
@@ -521,18 +513,21 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
-	}
-
-	return nil
+	return c.persistCommand(command)
 }
 
 func (c *Collection) Close() error {
-	err := c.file.Close()
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+
+	if c.file == nil {
+		return nil
+	}
+
+	closeErr := c.file.Close()
 	c.file = nil
-	return err
+
+	return closeErr
 }
 
 func (c *Collection) Drop() error {
@@ -583,10 +578,95 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
+	return c.persistCommand(command)
+}
+
+func (c *Collection) persistCommand(command *Command) error {
+	dataPtr := commandBufferPool.Get().(*[]byte)
+	buf := encodeCommand((*dataPtr)[:0], command)
+	defer func(b []byte) {
+		*dataPtr = b[:0]
+		commandBufferPool.Put(dataPtr)
+	}(buf)
+
+	c.fileMu.RLock()
+	file := c.file
+	if file == nil {
+		c.fileMu.RUnlock()
+		return fmt.Errorf("collection is closed")
+	}
+
+	offset := atomic.AddInt64(&c.offset, int64(len(buf))) - int64(len(buf))
+	err := writeFullAt(file, buf, offset)
+	c.fileMu.RUnlock()
 	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+		return fmt.Errorf("write: %w", err)
 	}
 
 	return nil
+}
+
+func writeFullAt(f *os.File, data []byte, offset int64) error {
+	for len(data) > 0 {
+		n, err := f.WriteAt(data, offset)
+		if err != nil {
+			return err
+		}
+		data = data[n:]
+		offset += int64(n)
+	}
+	return nil
+}
+
+var commandBufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, 1024)
+		return &buf
+	},
+}
+
+func encodeCommand(dst []byte, command *Command) []byte {
+	payloadLen := len(command.Payload)
+	buf := dst
+	if cap(buf) < payloadLen+256 {
+		buf = make([]byte, 0, payloadLen+256)
+	}
+
+	buf = buf[:0]
+
+	buf = append(buf, '{')
+	buf = appendJSONFieldString(buf, "name", command.Name)
+	buf = append(buf, ',')
+	buf = appendJSONFieldString(buf, "uuid", command.Uuid)
+	buf = append(buf, ',')
+	buf = appendJSONFieldInt(buf, "timestamp", command.Timestamp)
+	buf = append(buf, ',')
+	buf = appendJSONFieldInt(buf, "start_byte", command.StartByte)
+	buf = append(buf, ',')
+	buf = append(buf, '"', 'p', 'a', 'y', 'l', 'o', 'a', 'd', '"', ':')
+	if payloadLen > 0 {
+		buf = append(buf, command.Payload...)
+	} else {
+		buf = append(buf, 'n', 'u', 'l', 'l')
+	}
+	buf = append(buf, '}')
+	buf = append(buf, '\n')
+
+	return buf
+}
+
+func appendJSONFieldString(dst []byte, key, value string) []byte {
+	dst = append(dst, '"')
+	dst = append(dst, key...)
+	dst = append(dst, '"', ':')
+	dst = strconv.AppendQuote(dst, value)
+	return dst
+}
+
+func appendJSONFieldInt(dst []byte, key string, value int64) []byte {
+	dst = append(dst, '"')
+	dst = append(dst, key...)
+	dst = append(dst, '"', ':')
+	dst = strconv.AppendInt(dst, value, 10)
+	return dst
 }

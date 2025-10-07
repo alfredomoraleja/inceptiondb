@@ -20,6 +20,7 @@ type Collection struct {
 	Filename  string // Just informative...
 	file      *os.File
 	buffer    *bufio.Writer
+	persistMu sync.Mutex
 	Rows      []*Row
 	rowsMutex *sync.Mutex
 	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
@@ -215,12 +216,30 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.buffer).Encode(command)
-	if err != nil {
-		return nil, fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return nil, err
 	}
 
 	return row, nil
+}
+
+func (c *Collection) persistCommand(command *Command) error {
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
+	if c.buffer == nil {
+		return fmt.Errorf("collection is closed")
+	}
+
+	if err := json.NewEncoder(c.buffer).Encode(command); err != nil {
+		return fmt.Errorf("json encode command: %w", err)
+	}
+
+	if err := c.buffer.Flush(); err != nil {
+		return fmt.Errorf("flush buffer: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Collection) FindOne(data interface{}) {
@@ -286,9 +305,8 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.buffer).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return err
 	}
 
 	return nil
@@ -353,9 +371,8 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.buffer).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return err
 	}
 
 	return nil
@@ -457,10 +474,8 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.buffer).Encode(command)
-	if err != nil {
-		// TODO: panic?
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return err
 	}
 
 	return nil
@@ -524,15 +539,17 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.buffer).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return err
 	}
 
 	return nil
 }
 
 func (c *Collection) Close() error {
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
 	var firstErr error
 
 	if c.buffer != nil {
@@ -601,9 +618,8 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.buffer).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command); err != nil {
+		return err
 	}
 
 	return nil

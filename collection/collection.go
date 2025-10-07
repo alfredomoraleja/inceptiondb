@@ -262,25 +262,11 @@ func (c *Collection) persistCommand(command *Command, forceFlush bool) error {
 		return fmt.Errorf("collection is closed")
 	}
 
-	if forceFlush {
-		if c.buffer.Buffered() > 0 {
-			if err := c.buffer.Flush(); err != nil {
-				return fmt.Errorf("flush buffer: %w", err)
-			}
-		}
-
-		if _, err := c.file.Write(encoded); err != nil {
-			return fmt.Errorf("write command: %w", err)
-		}
-
-		return nil
-	}
-
 	if _, err := c.buffer.Write(encoded); err != nil {
 		return fmt.Errorf("write command: %w", err)
 	}
 
-	if c.buffer.Buffered() >= persistFlushThreshold {
+	if forceFlush || c.buffer.Buffered() >= persistFlushThreshold {
 		if err := c.buffer.Flush(); err != nil {
 			return fmt.Errorf("flush buffer: %w", err)
 		}

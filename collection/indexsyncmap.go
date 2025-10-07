@@ -21,11 +21,12 @@ func NewIndexSyncMap(options *IndexMapOptions) *IndexSyncMap {
 
 func (i *IndexSyncMap) RemoveRow(row *Row) error {
 
-	item := map[string]interface{}{}
-
-	err := json.Unmarshal(row.Payload, &item)
-	if err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
+	item := row.Values
+	if item == nil {
+		item = map[string]any{}
+		if err := json.Unmarshal(row.Payload, &item); err != nil {
+			return fmt.Errorf("unmarshal: %w", err)
+		}
 	}
 
 	field := i.Options.Field
@@ -40,9 +41,16 @@ func (i *IndexSyncMap) RemoveRow(row *Row) error {
 	switch value := itemValue.(type) {
 	case string:
 		entries.Delete(value)
+	case []string:
+		for _, s := range value {
+			entries.Delete(s)
+		}
 	case []interface{}:
 		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Errorf("type not supported")
+			}
 			entries.Delete(s)
 		}
 	default:
@@ -55,10 +63,12 @@ func (i *IndexSyncMap) RemoveRow(row *Row) error {
 
 func (i *IndexSyncMap) AddRow(row *Row) error {
 
-	item := map[string]interface{}{}
-	err := json.Unmarshal(row.Payload, &item)
-	if err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
+	item := row.Values
+	if item == nil {
+		item = map[string]any{}
+		if err := json.Unmarshal(row.Payload, &item); err != nil {
+			return fmt.Errorf("unmarshal: %w", err)
+		}
 	}
 
 	field := i.Options.Field
@@ -81,16 +91,30 @@ func (i *IndexSyncMap) AddRow(row *Row) error {
 			return fmt.Errorf("index conflict: field '%s' with value '%s'", field, value)
 		}
 		entries.Store(value, row)
-	case []interface{}:
-		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
-			if _, exists := entries.Load(s); exists {
+	case []string:
+		keys := value
+		for _, key := range keys {
+			if _, exists := entries.Load(key); exists {
 				return fmt.Errorf("index conflict: field '%s' with value '%s'", field, value)
 			}
 		}
+		for _, key := range keys {
+			entries.Store(key, row)
+		}
+	case []interface{}:
+		keys := make([]string, 0, len(value))
 		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
-			entries.Store(s, row)
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Errorf("type not supported")
+			}
+			if _, exists := entries.Load(s); exists {
+				return fmt.Errorf("index conflict: field '%s' with value '%s'", field, value)
+			}
+			keys = append(keys, s)
+		}
+		for _, key := range keys {
+			entries.Store(key, row)
 		}
 	default:
 		return fmt.Errorf("type not supported")

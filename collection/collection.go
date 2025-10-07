@@ -1,6 +1,7 @@
 package collection
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,9 +19,13 @@ import (
 type Collection struct {
 	Filename  string // Just informative...
 	file      *os.File
+	fileMutex sync.Mutex
+	buffer    *bufio.Writer
+	encoder   *json.Encoder
 	Rows      []*Row
 	rowsMutex *sync.Mutex
 	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
+	indexesMu sync.RWMutex
 	// buffer   *bufio.Writer // TODO: use write buffer to improve performance (x3 in tests)
 	Defaults map[string]any
 	Count    int64
@@ -35,7 +40,19 @@ type collectionIndex struct {
 type Row struct {
 	I          int // position in Rows
 	Payload    json.RawMessage
+	Values     map[string]any
 	PatchMutex sync.Mutex
+}
+
+func cloneItem(item map[string]any) map[string]any {
+	if item == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(item))
+	for k, v := range item {
+		clone[k] = v
+	}
+	return clone
 }
 
 func OpenCollection(filename string) (*Collection, error) {
@@ -67,7 +84,7 @@ func OpenCollection(filename string) (*Collection, error) {
 
 		switch command.Name {
 		case "insert":
-			_, err := collection.addRow(command.Payload)
+			_, err := collection.addRow(command.Payload, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -129,6 +146,10 @@ func OpenCollection(filename string) (*Collection, error) {
 		}
 	}
 
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close read file: %w", err)
+	}
+
 	// Open file for append only
 	// todo: investigate O_SYNC
 	collection.file, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
@@ -136,16 +157,34 @@ func OpenCollection(filename string) (*Collection, error) {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
 
+	collection.buffer = bufio.NewWriterSize(collection.file, 64*1024)
+	collection.encoder = json.NewEncoder(collection.buffer)
+	collection.encoder.SetEscapeHTML(false)
+
+	collection.Count = int64(len(collection.Rows))
+
 	return collection, nil
 }
 
-func (c *Collection) addRow(payload json.RawMessage) (*Row, error) {
+func (c *Collection) addRow(payload json.RawMessage, values map[string]any) (*Row, error) {
+
+	if values == nil {
+		decoded := map[string]any{}
+		err := json.Unmarshal(payload, &decoded)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal payload: %w", err)
+		}
+		values = decoded
+	}
 
 	row := &Row{
 		Payload: payload,
+		Values:  values,
 	}
 
+	c.indexesMu.RLock()
 	err := indexInsert(c.Indexes, row)
+	c.indexesMu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -197,8 +236,10 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		return nil, fmt.Errorf("json encode payload: %w", err)
 	}
 
+	values := cloneItem(item)
+
 	// Add row
-	row, err := c.addRow(payload)
+	row, err := c.addRow(payload, values)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +253,7 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
+	err = c.persistCommand(command)
 	if err != nil {
 		return nil, fmt.Errorf("json encode command: %w", err)
 	}
@@ -283,7 +324,7 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
+	err = c.persistCommand(command)
 	if err != nil {
 		return fmt.Errorf("json encode command: %w", err)
 	}
@@ -299,7 +340,9 @@ func (c *Collection) Index(name string, options interface{}) error { // todo: re
 
 func (c *Collection) createIndex(name string, options interface{}, persist bool) error {
 
+	c.indexesMu.Lock()
 	if _, exists := c.Indexes[name]; exists {
+		c.indexesMu.Unlock()
 		return fmt.Errorf("index '%s' already exists", name)
 	}
 
@@ -315,6 +358,7 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		index.Index = NewIndexBTree(value)
 		index.Options = value
 	default:
+		c.indexesMu.Unlock()
 		return fmt.Errorf("unexpected options parameters, it should be [map|btree]")
 	}
 
@@ -325,9 +369,12 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		err := index.AddRow(row)
 		if err != nil {
 			delete(c.Indexes, name)
+			c.indexesMu.Unlock()
 			return fmt.Errorf("index row: %s, data: %s", err.Error(), string(row.Payload))
 		}
 	}
+
+	c.indexesMu.Unlock()
 
 	if !persist {
 		return nil
@@ -350,7 +397,7 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
+	err = c.persistCommand(command)
 	if err != nil {
 		return fmt.Errorf("json encode command: %w", err)
 	}
@@ -420,7 +467,9 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 			return fmt.Errorf("row %d does not exist", i)
 		}
 
+		c.indexesMu.RLock()
 		err := indexRemove(c.Indexes, row)
+		c.indexesMu.RUnlock()
 		if err != nil {
 			return fmt.Errorf("could not free index")
 		}
@@ -454,7 +503,7 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
+	err = c.persistCommand(command)
 	if err != nil {
 		// TODO: panic?
 		return fmt.Errorf("json encode command: %w", err)
@@ -489,14 +538,24 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	}
 
 	// index update
+	updatedValues := map[string]any{}
+	if err := json.Unmarshal(newPayload, &updatedValues); err != nil {
+		return fmt.Errorf("unmarshal patched payload: %w", err)
+	}
+
+	c.indexesMu.RLock()
 	err = indexRemove(c.Indexes, row)
+	c.indexesMu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("indexRemove: %w", err)
 	}
 
 	row.Payload = newPayload
+	row.Values = updatedValues
 
+	c.indexesMu.RLock()
 	err = indexInsert(c.Indexes, row)
+	c.indexesMu.RUnlock()
 	if err != nil {
 		return fmt.Errorf("indexInsert: %w", err)
 	}
@@ -521,7 +580,7 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
+	err = c.persistCommand(command)
 	if err != nil {
 		return fmt.Errorf("json encode command: %w", err)
 	}
@@ -529,9 +588,44 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	return nil
 }
 
+func (c *Collection) persistCommand(command *Command) error {
+	c.fileMutex.Lock()
+	defer c.fileMutex.Unlock()
+
+	if c.encoder == nil {
+		return fmt.Errorf("collection encoder not initialized")
+	}
+
+	if err := c.encoder.Encode(command); err != nil {
+		return err
+	}
+
+	if c.buffer != nil {
+		if err := c.buffer.Flush(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (c *Collection) Close() error {
-	err := c.file.Close()
-	c.file = nil
+	c.fileMutex.Lock()
+	defer c.fileMutex.Unlock()
+
+	if c.buffer != nil {
+		if err := c.buffer.Flush(); err != nil {
+			return fmt.Errorf("flush buffer: %w", err)
+		}
+	}
+
+	var err error
+	if c.file != nil {
+		err = c.file.Close()
+		c.file = nil
+	}
+	c.buffer = nil
+	c.encoder = nil
 	return err
 }
 
@@ -558,11 +652,16 @@ type DropIndexCommand struct {
 }
 
 func (c *Collection) dropIndex(name string, persist bool) error {
+	c.indexesMu.Lock()
+
 	_, exists := c.Indexes[name]
 	if !exists {
+		c.indexesMu.Unlock()
 		return fmt.Errorf("dropIndex: index '%s' not found", name)
 	}
 	delete(c.Indexes, name)
+
+	c.indexesMu.Unlock()
 
 	if !persist {
 		return nil
@@ -583,7 +682,7 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
+	err = c.persistCommand(command)
 	if err != nil {
 		return fmt.Errorf("json encode command: %w", err)
 	}

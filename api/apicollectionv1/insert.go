@@ -14,12 +14,6 @@ import (
 
 func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
-	wc := http.NewResponseController(w)
-	wcerr := wc.EnableFullDuplex()
-	if wcerr != nil {
-		return wcerr
-	}
-
 	s := GetServicer(ctx)
 	collectionName := box.GetUrlParameter(ctx, "collectionName")
 	collection, err := s.GetCollection(collectionName)
@@ -56,9 +50,11 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 	// ALT 3
 	// not needed
 
-	// item := map[string]any{} // Idea: same item and clean on each iteration
+	item := make(map[string]any)
 	for i := 0; true; i++ {
-		item := map[string]any{}
+		for k := range item {
+			delete(item, k)
+		}
 		// READER:ALT 1
 		err := jsonReader.Decode(&item)
 		// READER:ALT 2
@@ -100,7 +96,12 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		// )
 
 		// ALT 3
-		fmt.Fprintln(w, string(row.Payload))
+		if _, err := w.Write(row.Payload); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte("\n")); err != nil {
+			return err
+		}
 
 		// ALT 4
 		// query param to optionally write nothing

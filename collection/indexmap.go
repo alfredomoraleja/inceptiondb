@@ -23,11 +23,12 @@ func NewIndexMap(options *IndexMapOptions) *IndexMap {
 
 func (i *IndexMap) RemoveRow(row *Row) error {
 
-	item := map[string]interface{}{}
-
-	err := json.Unmarshal(row.Payload, &item)
-	if err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
+	item := row.Values
+	if item == nil {
+		item = map[string]any{}
+		if err := json.Unmarshal(row.Payload, &item); err != nil {
+			return fmt.Errorf("unmarshal: %w", err)
+		}
 	}
 
 	field := i.Options.Field
@@ -39,14 +40,30 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 		return nil
 	}
 
+	mutex := i.RWmutex
+
 	switch value := itemValue.(type) {
 	case string:
+		mutex.Lock()
 		delete(entries, value)
-	case []interface{}:
-		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
+		mutex.Unlock()
+	case []string:
+		mutex.Lock()
+		for _, s := range value {
 			delete(entries, s)
 		}
+		mutex.Unlock()
+	case []interface{}:
+		mutex.Lock()
+		for _, v := range value {
+			s, ok := v.(string)
+			if !ok {
+				mutex.Unlock()
+				return fmt.Errorf("type not supported")
+			}
+			delete(entries, s)
+		}
+		mutex.Unlock()
 	default:
 		// Should this error?
 		return fmt.Errorf("type not supported")
@@ -57,10 +74,12 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 
 func (i *IndexMap) AddRow(row *Row) error {
 
-	item := map[string]interface{}{}
-	err := json.Unmarshal(row.Payload, &item)
-	if err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
+	item := row.Values
+	if item == nil {
+		item = map[string]any{}
+		if err := json.Unmarshal(row.Payload, &item); err != nil {
+			return fmt.Errorf("unmarshal: %w", err)
+		}
 	}
 
 	field := i.Options.Field
@@ -91,17 +110,39 @@ func (i *IndexMap) AddRow(row *Row) error {
 		entries[value] = row
 		mutex.Unlock()
 
-	case []interface{}:
-		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
-			if _, exists := entries[s]; exists {
+	case []string:
+		keys := value
+		mutex.RLock()
+		for _, key := range keys {
+			if _, exists := entries[key]; exists {
+				mutex.RUnlock()
 				return fmt.Errorf("index conflict: field '%s' with value '%s'", field, value)
 			}
 		}
-		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
-			entries[s] = row
+		mutex.RUnlock()
+
+		mutex.Lock()
+		for _, key := range keys {
+			entries[key] = row
 		}
+		mutex.Unlock()
+	case []interface{}:
+		keys := make([]string, 0, len(value))
+		for _, v := range value {
+			s, ok := v.(string)
+			if !ok {
+				return fmt.Errorf("type not supported")
+			}
+			if _, exists := entries[s]; exists {
+				return fmt.Errorf("index conflict: field '%s' with value '%s'", field, value)
+			}
+			keys = append(keys, s)
+		}
+		mutex.Lock()
+		for _, key := range keys {
+			entries[key] = row
+		}
+		mutex.Unlock()
 	default:
 		return fmt.Errorf("type not supported")
 	}

@@ -1,6 +1,7 @@
 package collection
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -113,8 +114,8 @@ func OpenCollection(filename string) (*Collection, error) {
 			}
 		case "patch":
 			params := struct {
-				I    int
-				Diff map[string]interface{}
+				I    int             `json:"i"`
+				Diff json.RawMessage `json:"diff"`
 			}{}
 			json.Unmarshal(command.Payload, &params)
 			row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
@@ -469,9 +470,20 @@ func (c *Collection) Patch(row *Row, patch interface{}) error {
 
 func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error { // todo: rename to 'patchRow'
 
-	patchBytes, err := json.Marshal(patch)
-	if err != nil {
-		return fmt.Errorf("marshal patch: %w", err)
+	var patchBytes []byte
+	switch v := patch.(type) {
+	case json.RawMessage:
+		patchBytes = v
+	case []byte:
+		patchBytes = v
+	case nil:
+		patchBytes = []byte("null")
+	default:
+		var err error
+		patchBytes, err = json.Marshal(patch)
+		if err != nil {
+			return fmt.Errorf("marshal patch: %w", err)
+		}
 	}
 
 	newPayload, err := jsonpatch.MergePatch(row.Payload, patchBytes)
@@ -479,12 +491,7 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		return fmt.Errorf("cannot apply patch: %w", err)
 	}
 
-	diff, err := jsonpatch.CreateMergePatch(row.Payload, newPayload) // todo: optimization: discard operation if empty
-	if err != nil {
-		return fmt.Errorf("cannot diff: %w", err)
-	}
-
-	if len(diff) == 2 { // diff == '{}'
+	if bytes.Equal(newPayload, row.Payload) {
 		return nil
 	}
 
@@ -506,9 +513,12 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	}
 
 	// Persist
-	payload, err := json.Marshal(map[string]interface{}{
-		"i":    row.I,
-		"diff": json.RawMessage(diff),
+	payload, err := json.Marshal(&struct {
+		I    int             `json:"i"`
+		Diff json.RawMessage `json:"diff"`
+	}{
+		I:    row.I,
+		Diff: json.RawMessage(patchBytes),
 	})
 	if err != nil {
 		return err // todo: wrap error

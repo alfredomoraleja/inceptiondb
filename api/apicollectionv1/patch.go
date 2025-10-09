@@ -27,8 +27,8 @@ func patch(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 	}
 
 	patch := struct {
-		Filter map[string]interface{}
-		Patch  interface{}
+		Filter map[string]interface{} `json:"filter"`
+		Patch  json.RawMessage        `json:"patch"`
 	}{}
 	json.Unmarshal(requestBody, &patch) // TODO: handle err
 

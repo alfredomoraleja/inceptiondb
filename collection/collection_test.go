@@ -45,16 +45,24 @@ func TestCollection_Insert_Concurrency(t *testing.T) {
 
 		n := 100
 
+		errCh := make(chan error, n)
 		wg := &sync.WaitGroup{}
 		for i := 0; i < n; i++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				c.Insert(map[string]interface{}{"hello": "world"})
+				if _, err := c.Insert(map[string]interface{}{"hello": "world"}); err != nil {
+					errCh <- err
+				}
 			}()
 		}
 
 		wg.Wait()
+		close(errCh)
+
+		for err := range errCh {
+			t.Fatalf("concurrent insert failed: %v", err)
+		}
 
 		AssertEqual(len(c.Rows), n)
 	})

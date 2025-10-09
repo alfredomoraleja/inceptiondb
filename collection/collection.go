@@ -1,6 +1,8 @@
 package collection
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,12 +20,13 @@ import (
 type Collection struct {
 	Filename  string // Just informative...
 	file      *os.File
+	buffer    *bufio.Writer
+	persistMu sync.Mutex
 	Rows      []*Row
 	rowsMutex *sync.Mutex
 	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
-	// buffer   *bufio.Writer // TODO: use write buffer to improve performance (x3 in tests)
-	Defaults map[string]any
-	Count    int64
+	Defaults  map[string]any
+	Count     int64
 }
 
 type collectionIndex struct {
@@ -136,6 +139,8 @@ func OpenCollection(filename string) (*Collection, error) {
 		return nil, fmt.Errorf("open file for write: %w", err)
 	}
 
+	collection.buffer = bufio.NewWriterSize(collection.file, 1<<20)
+
 	return collection, nil
 }
 
@@ -212,12 +217,62 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return nil, fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command, true); err != nil {
+		return nil, err
 	}
 
 	return row, nil
+}
+
+const persistFlushThreshold = 256 * 1024
+
+type commandEncoder struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+var commandEncoderPool = sync.Pool{
+	New: func() any {
+		buf := bytes.NewBuffer(make([]byte, 0, 4096))
+		enc := json.NewEncoder(buf)
+		enc.SetEscapeHTML(false)
+		return &commandEncoder{buf: buf, enc: enc}
+	},
+}
+
+func (c *Collection) persistCommand(command *Command, forceFlush bool) error {
+	ce := commandEncoderPool.Get().(*commandEncoder)
+	ce.buf.Reset()
+
+	if err := ce.enc.Encode(command); err != nil {
+		commandEncoderPool.Put(ce)
+		return fmt.Errorf("json encode command: %w", err)
+	}
+
+	encoded := ce.buf.Bytes()
+
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+	defer func() {
+		ce.buf.Reset()
+		commandEncoderPool.Put(ce)
+	}()
+
+	if c.buffer == nil {
+		return fmt.Errorf("collection is closed")
+	}
+
+	if _, err := c.buffer.Write(encoded); err != nil {
+		return fmt.Errorf("write command: %w", err)
+	}
+
+	if forceFlush || c.buffer.Buffered() >= persistFlushThreshold {
+		if err := c.buffer.Flush(); err != nil {
+			return fmt.Errorf("flush buffer: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func (c *Collection) FindOne(data interface{}) {
@@ -283,9 +338,8 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command, true); err != nil {
+		return err
 	}
 
 	return nil
@@ -350,9 +404,8 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command, true); err != nil {
+		return err
 	}
 
 	return nil
@@ -454,10 +507,8 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		// TODO: panic?
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command, true); err != nil {
+		return err
 	}
 
 	return nil
@@ -521,18 +572,35 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command, true); err != nil {
+		return err
 	}
 
 	return nil
 }
 
 func (c *Collection) Close() error {
-	err := c.file.Close()
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+
+	var firstErr error
+
+	if c.buffer != nil {
+		if err := c.buffer.Flush(); err != nil {
+			firstErr = fmt.Errorf("flush buffer: %w", err)
+		}
+	}
+
+	if c.file != nil {
+		if err := c.file.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	c.buffer = nil
 	c.file = nil
-	return err
+
+	return firstErr
 }
 
 func (c *Collection) Drop() error {
@@ -583,9 +651,8 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		Payload:   payload,
 	}
 
-	err = json.NewEncoder(c.file).Encode(command)
-	if err != nil {
-		return fmt.Errorf("json encode command: %w", err)
+	if err := c.persistCommand(command, true); err != nil {
+		return err
 	}
 
 	return nil

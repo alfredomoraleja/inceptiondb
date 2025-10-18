@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/google/uuid"
 
 	"github.com/fulldump/inceptiondb/utils"
@@ -495,23 +495,29 @@ func (c *Collection) Patch(row *Row, patch interface{}) error {
 
 func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error { // todo: rename to 'patchRow'
 
-	patchBytes, err := json.Marshal(patch)
+	patchMap, err := normalizePatch(patch)
 	if err != nil {
-		return fmt.Errorf("marshal patch: %w", err)
+		return fmt.Errorf("normalize patch: %w", err)
 	}
 
-	newPayload, err := jsonpatch.MergePatch(row.Payload, patchBytes)
+	current, err := decodePayload(row.Payload)
 	if err != nil {
-		return fmt.Errorf("cannot apply patch: %w", err)
+		return fmt.Errorf("decode payload: %w", err)
 	}
 
-	diff, err := jsonpatch.CreateMergePatch(row.Payload, newPayload) // todo: optimization: discard operation if empty
-	if err != nil {
-		return fmt.Errorf("cannot diff: %w", err)
-	}
-
-	if len(diff) == 2 { // diff == '{}'
+	updated, diff, changed := applyMergePatch(current, patchMap)
+	if !changed {
 		return nil
+	}
+
+	newPayload, err := json.Marshal(updated)
+	if err != nil {
+		return fmt.Errorf("marshal patched payload: %w", err)
+	}
+
+	diffBytes, err := json.Marshal(diff)
+	if err != nil {
+		return fmt.Errorf("marshal diff: %w", err)
 	}
 
 	// index update
@@ -534,7 +540,7 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	// Persist
 	payload, err := json.Marshal(map[string]interface{}{
 		"i":    row.I,
-		"diff": json.RawMessage(diff),
+		"diff": json.RawMessage(diffBytes),
 	})
 	if err != nil {
 		return err // todo: wrap error
@@ -550,6 +556,177 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	return c.EncodeCommand(command)
 }
 
+func decodePayload(payload json.RawMessage) (map[string]interface{}, error) {
+	if len(payload) == 0 {
+		return map[string]interface{}{}, nil
+	}
+
+	result := map[string]interface{}{}
+	err := json.Unmarshal(payload, &result)
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func normalizePatch(patch interface{}) (map[string]interface{}, error) {
+	switch v := patch.(type) {
+	case map[string]interface{}:
+		return v, nil
+	case json.RawMessage:
+		return normalizePatchBytes([]byte(v))
+	case []byte:
+		return normalizePatchBytes(v)
+	default:
+		bytes, err := json.Marshal(patch)
+		if err != nil {
+			return nil, err
+		}
+		return normalizePatchBytes(bytes)
+	}
+}
+
+func normalizePatchBytes(data []byte) (map[string]interface{}, error) {
+	result := map[string]interface{}{}
+	if len(data) == 0 {
+		return result, nil
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func applyMergePatch(doc map[string]interface{}, patch map[string]interface{}) (map[string]interface{}, map[string]interface{}, bool) {
+	if doc == nil {
+		doc = map[string]interface{}{}
+	}
+
+	diff, changed := mergeInto(doc, patch)
+	if !changed {
+		return doc, nil, false
+	}
+
+	return doc, diff, true
+}
+
+func mergeInto(doc map[string]interface{}, patch map[string]interface{}) (map[string]interface{}, bool) {
+	diff := make(map[string]interface{})
+	changed := false
+
+	for key, patchValue := range patch {
+		originalValue, exists := doc[key]
+
+		if patchValue == nil {
+			if exists {
+				delete(doc, key)
+				diff[key] = nil
+				changed = true
+			}
+			continue
+		}
+
+		if patchMap, ok := toMap(patchValue); ok {
+			if originalMap, ok := toMap(originalValue); ok {
+				nestedDiff, nestedChanged := mergeInto(originalMap, patchMap)
+				if nestedChanged {
+					diff[key] = nestedDiff
+					changed = true
+				}
+				doc[key] = originalMap
+			} else {
+				newMap := cloneMap(patchMap)
+				doc[key] = newMap
+				diff[key] = newMap
+				changed = true
+			}
+			continue
+		}
+
+		if patchSlice, ok := toSlice(patchValue); ok {
+			if !exists || !reflect.DeepEqual(originalValue, patchSlice) {
+				cloned := cloneSlice(patchSlice)
+				doc[key] = cloned
+				diff[key] = cloned
+				changed = true
+			}
+			continue
+		}
+
+		if !exists || !reflect.DeepEqual(originalValue, patchValue) {
+			doc[key] = patchValue
+			diff[key] = patchValue
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil, false
+	}
+
+	return diff, true
+}
+
+func toMap(value interface{}) (map[string]interface{}, bool) {
+	if value == nil {
+		return nil, false
+	}
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return typed, true
+	}
+	return nil, false
+}
+
+func toSlice(value interface{}) ([]interface{}, bool) {
+	if value == nil {
+		return nil, false
+	}
+	switch typed := value.(type) {
+	case []interface{}:
+		return typed, true
+	}
+	return nil, false
+}
+
+func cloneSlice(value []interface{}) []interface{} {
+	if value == nil {
+		return nil
+	}
+	cloned := make([]interface{}, len(value))
+	for i, item := range value {
+		if mapValue, ok := toMap(item); ok {
+			cloned[i] = cloneMap(mapValue)
+			continue
+		}
+		if sliceValue, ok := toSlice(item); ok {
+			cloned[i] = cloneSlice(sliceValue)
+			continue
+		}
+		cloned[i] = item
+	}
+	return cloned
+}
+
+func cloneMap(value map[string]interface{}) map[string]interface{} {
+	if value == nil {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(value))
+	for key, item := range value {
+		if mapValue, ok := toMap(item); ok {
+			cloned[key] = cloneMap(mapValue)
+			continue
+		}
+		if sliceValue, ok := toSlice(item); ok {
+			cloned[key] = cloneSlice(sliceValue)
+			continue
+		}
+		cloned[key] = item
+	}
+	return cloned
+}
 func (c *Collection) Close() error {
 	{
 		err := c.buffer.Flush()

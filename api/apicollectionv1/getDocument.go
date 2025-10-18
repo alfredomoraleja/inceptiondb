@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
 	"net/http"
 	"strings"
@@ -55,7 +55,7 @@ func getDocument(ctx context.Context) (*documentLookupResponse, error) {
 	}
 
 	document := map[string]any{}
-	if err := json.Unmarshal(row.Payload, &document); err != nil {
+	if err := json2.Unmarshal(row.Payload, &document); err != nil {
 		return nil, fmt.Errorf("decode document: %w", err)
 	}
 
@@ -93,7 +93,7 @@ func findRowByID(col *collection.Collection, documentID string) (*collection.Row
 			continue
 		}
 
-		payload, err := json.Marshal(&mapLookupPayload{Value: normalizedID})
+		payload, err := json2.Marshal(&mapLookupPayload{Value: normalizedID})
 		if err != nil {
 			return nil, nil, fmt.Errorf("prepare index lookup: %w", err)
 		}
@@ -111,7 +111,7 @@ func findRowByID(col *collection.Collection, documentID string) (*collection.Row
 
 	for _, row := range col.Rows {
 		var item map[string]any
-		if err := json.Unmarshal(row.Payload, &item); err != nil {
+		if err := json2.Unmarshal(row.Payload, &item); err != nil {
 			continue
 		}
 		value, exists := item["id"]
@@ -138,12 +138,12 @@ func normalizeMapOptions(options interface{}) (*collection.IndexMapOptions, erro
 	case collection.IndexMapOptions:
 		return &value, nil
 	default:
-		data, err := json.Marshal(value)
+		data, err := json2.Marshal(value)
 		if err != nil {
 			return nil, err
 		}
 		opts := &collection.IndexMapOptions{}
-		if err := json.Unmarshal(data, opts); err != nil {
+		if err := json2.Unmarshal(data, opts); err != nil {
 			return nil, err
 		}
 		return opts, nil
@@ -155,7 +155,7 @@ func normalizeDocumentID(value interface{}) string {
 	switch v := value.(type) {
 	case string:
 		return strings.TrimSpace(v)
-	case json.Number:
+	case json2.Number:
 		return v.String()
 	default:
 		return strings.TrimSpace(fmt.Sprint(v))

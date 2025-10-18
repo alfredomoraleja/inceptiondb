@@ -1,7 +1,7 @@
 package collection
 
 import (
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
 	"reflect"
 	"strings"
@@ -19,7 +19,7 @@ func (b *IndexBtree) RemoveRow(r *Row) error {
 	// TODO: duplicated code:
 	values := []interface{}{}
 	data := map[string]interface{}{}
-	json.Unmarshal(r.Payload, &data)
+	json2.Unmarshal(r.Payload, &data)
 
 	for _, field := range b.Options.Fields {
 		values = append(values, data[field])
@@ -105,7 +105,7 @@ func NewIndexBTree(options *IndexBTreeOptions) *IndexBtree {
 func (b *IndexBtree) AddRow(r *Row) error {
 	var values []interface{}
 	data := map[string]interface{}{}
-	json.Unmarshal(r.Payload, &data)
+	json2.Unmarshal(r.Payload, &data)
 
 	for _, field := range b.Options.Fields {
 		field = strings.TrimPrefix(field, "-")
@@ -144,7 +144,7 @@ func (b *IndexBtree) AddRow(r *Row) error {
 func (b *IndexBtree) Traverse(optionsData []byte, f func(*Row) bool) {
 
 	options := &IndexBtreeTraverse{}
-	json.Unmarshal(optionsData, options) // todo: handle error
+	json2.Unmarshal(optionsData, options) // todo: handle error
 
 	iterator := func(r *RowOrdered) bool {
 		return f(r.Row)

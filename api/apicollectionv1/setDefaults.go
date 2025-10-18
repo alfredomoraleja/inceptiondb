@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"net/http"
 
 	"github.com/fulldump/box"
@@ -33,7 +33,7 @@ func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 
 	defaults := col.Defaults
 
-	err = json.NewDecoder(r.Body).Decode(&defaults)
+	err = json2.NewDecoder(r.Body).Decode(&defaults)
 	if err != nil {
 		return err // todo: handle/wrap this properly
 	}
@@ -53,7 +53,7 @@ func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 
-	err = json.NewEncoder(w).Encode(col.Defaults)
+	err = json2.NewEncoder(w).Encode(col.Defaults)
 	if err != nil {
 		return err // todo: handle/wrap this properly
 	}

@@ -3,7 +3,6 @@ package collection
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"encoding/json/jsontext"
 	json2 "encoding/json/v2"
 	"fmt"
@@ -20,15 +19,19 @@ import (
 )
 
 type Collection struct {
-	Filename     string // Just informative...
-	file         *os.File
-	Rows         []*Row
-	rowsMutex    *sync.Mutex
-	Indexes      map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
-	buffer       *bufio.Writer               // TODO: use write buffer to improve performance (x3 in tests)
-	Defaults     map[string]any
-	Count        int64
-	encoderMutex *sync.Mutex
+	Filename  string // Just informative...
+	file      *os.File
+	Rows      []*Row
+	rowsMutex *sync.Mutex
+	Indexes   map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
+	buffer    *bufio.Writer               // TODO: use write buffer to improve performance (x3 in tests)
+	Defaults  map[string]any
+	Count     int64
+
+	writerQueue  chan *EncoderMachine
+	writerClosed atomic.Bool
+	writerDone   sync.WaitGroup
+	writeErr     atomic.Value
 }
 
 type collectionIndex struct {
@@ -39,24 +42,20 @@ type collectionIndex struct {
 
 type Row struct {
 	I          int // position in Rows
-	Payload    json.RawMessage
+	Payload    json2.RawMessage
 	PatchMutex sync.Mutex
 }
 
 type EncoderMachine struct {
 	Buffer *bytes.Buffer
-	Enc    *json.Encoder
 	Enc2   *jsontext.Encoder
 }
 
 var encPool = sync.Pool{
 	New: func() any {
 		buffer := bytes.NewBuffer(make([]byte, 0, 8*1024))
-		enc := json.NewEncoder(buffer)
-		enc.SetEscapeHTML(false)
 		return &EncoderMachine{
 			Buffer: buffer,
-			Enc:    enc,
 			Enc2: jsontext.NewEncoder(
 				buffer,
 				jsontext.AllowDuplicateNames(true),
@@ -79,12 +78,16 @@ func OpenCollection(filename string) (*Collection, error) {
 	}
 
 	collection := &Collection{
-		Rows:         []*Row{},
-		rowsMutex:    &sync.Mutex{},
-		Filename:     filename,
-		Indexes:      map[string]*collectionIndex{},
-		encoderMutex: &sync.Mutex{},
+		Rows:      []*Row{},
+		rowsMutex: &sync.Mutex{},
+		Filename:  filename,
+		Indexes:   map[string]*collectionIndex{},
 	}
+
+	collection.writerQueue = make(chan *EncoderMachine, 1024)
+	collection.writeErr.Store(error(nil))
+	collection.writerDone.Add(1)
+	go collection.commandWriter()
 
 	j := jsontext.NewDecoder(f,
 		jsontext.AllowDuplicateNames(true),
@@ -113,7 +116,7 @@ func OpenCollection(filename string) (*Collection, error) {
 			}
 		case "drop_index":
 			dropIndexCommand := &DropIndexCommand{}
-			json.Unmarshal(command.Payload, dropIndexCommand) // Todo: handle error properly
+			json2.Unmarshal(command.Payload, dropIndexCommand) // Todo: handle error properly
 
 			err := collection.dropIndex(dropIndexCommand.Name, false)
 			if err != nil {
@@ -122,7 +125,7 @@ func OpenCollection(filename string) (*Collection, error) {
 			}
 		case "index": // todo: rename to create_index
 			indexCommand := &CreateIndexCommand{}
-			json.Unmarshal(command.Payload, indexCommand) // Todo: handle error properly
+			json2.Unmarshal(command.Payload, indexCommand) // Todo: handle error properly
 
 			var options interface{}
 
@@ -145,8 +148,8 @@ func OpenCollection(filename string) (*Collection, error) {
 			params := struct {
 				I int
 			}{}
-			json.Unmarshal(command.Payload, &params) // Todo: handle error properly
-			row := collection.Rows[params.I]         // this access is threadsafe, OpenCollection is a secuence
+			json2.Unmarshal(command.Payload, &params) // Todo: handle error properly
+			row := collection.Rows[params.I]          // this access is threadsafe, OpenCollection is a secuence
 			err := collection.removeByRow(row, false)
 			if err != nil {
 				fmt.Printf("WARNING: remove row %d: %s\n", params.I, err.Error())
@@ -156,7 +159,7 @@ func OpenCollection(filename string) (*Collection, error) {
 				I    int
 				Diff map[string]interface{}
 			}{}
-			json.Unmarshal(command.Payload, &params)
+			json2.Unmarshal(command.Payload, &params)
 			row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
 			err := collection.patchByRow(row, params.Diff, false)
 			if err != nil {
@@ -164,7 +167,7 @@ func OpenCollection(filename string) (*Collection, error) {
 			}
 		case "set_defaults":
 			defaults := map[string]any{}
-			json.Unmarshal(command.Payload, &defaults)
+			json2.Unmarshal(command.Payload, &defaults)
 			collection.setDefaults(defaults, false)
 		}
 	}
@@ -181,7 +184,7 @@ func OpenCollection(filename string) (*Collection, error) {
 	return collection, nil
 }
 
-func (c *Collection) addRow(payload json.RawMessage) (*Row, error) {
+func (c *Collection) addRow(payload json2.RawMessage) (*Row, error) {
 
 	row := &Row{
 		Payload: payload,
@@ -210,7 +213,7 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 
 	if c.Defaults != nil {
 		// item := map[string]any{} // todo: item is shadowed, choose a better name
-		// err := json.Unmarshal(payload, &item)
+		// err := json2.Unmarshal(payload, &item)
 		// if err != nil {
 		// 	return nil, fmt.Errorf("json encode defaults: %w", err)
 		// }
@@ -234,7 +237,7 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		}
 	}
 
-	payload, err := json.Marshal(item)
+	payload, err := json2.Marshal(item)
 	if err != nil {
 		return nil, fmt.Errorf("json encode payload: %w", err)
 	}
@@ -264,7 +267,7 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 
 func (c *Collection) FindOne(data interface{}) {
 	for _, row := range c.Rows {
-		json.Unmarshal(row.Payload, data)
+		json2.Unmarshal(row.Payload, data)
 		return
 	}
 	// TODO return with error not found? or nil?
@@ -312,7 +315,7 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 		return nil
 	}
 
-	payload, err := json.Marshal(defaults)
+	payload, err := json2.Marshal(defaults)
 	if err != nil {
 		return fmt.Errorf("json encode payload: %w", err)
 	}
@@ -370,7 +373,7 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		return nil
 	}
 
-	payload, err := json.Marshal(&CreateIndexCommand{
+	payload, err := json2.Marshal(&CreateIndexCommand{
 		Name:    name,
 		Type:    index.Type,
 		Options: options,
@@ -472,7 +475,7 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 	}
 
 	// Persist
-	payload, err := json.Marshal(map[string]interface{}{
+	payload, err := json2.Marshal(map[string]interface{}{
 		"i": i,
 	})
 	if err != nil {
@@ -495,7 +498,7 @@ func (c *Collection) Patch(row *Row, patch interface{}) error {
 
 func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error { // todo: rename to 'patchRow'
 
-	patchBytes, err := json.Marshal(patch)
+	patchBytes, err := json2.Marshal(patch)
 	if err != nil {
 		return fmt.Errorf("marshal patch: %w", err)
 	}
@@ -532,9 +535,9 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	}
 
 	// Persist
-	payload, err := json.Marshal(map[string]interface{}{
+	payload, err := json2.Marshal(map[string]interface{}{
 		"i":    row.I,
-		"diff": json.RawMessage(diff),
+		"diff": json2.RawMessage(diff),
 	})
 	if err != nil {
 		return err // todo: wrap error
@@ -551,16 +554,29 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 }
 
 func (c *Collection) Close() error {
-	{
-		err := c.buffer.Flush()
-		if err != nil {
-			return err
-		}
+
+	if c.writerClosed.CompareAndSwap(false, true) {
+		close(c.writerQueue)
+		c.writerDone.Wait()
 	}
 
-	err := c.file.Close()
+	var firstErr error
+
+	if err := c.getWriteErr(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	if err := c.buffer.Flush(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	if err := c.file.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
 	c.file = nil
-	return err
+
+	return firstErr
 }
 
 func (c *Collection) Drop() error {
@@ -596,7 +612,7 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		return nil
 	}
 
-	payload, err := json.Marshal(&CreateIndexCommand{
+	payload, err := json2.Marshal(&CreateIndexCommand{
 		Name: name,
 	})
 	if err != nil {
@@ -614,23 +630,77 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 	return c.EncodeCommand(command)
 }
 
+func (c *Collection) commandWriter() {
+
+	defer c.writerDone.Done()
+
+	for em := range c.writerQueue {
+		if c.getWriteErr() == nil {
+			if _, err := c.buffer.Write(em.Buffer.Bytes()); err != nil {
+				c.setWriteErr(err)
+			}
+		}
+		em.Buffer.Reset()
+		encPool.Put(em)
+	}
+}
+
+func (c *Collection) getWriteErr() error {
+	if value := c.writeErr.Load(); value != nil {
+		if err, ok := value.(error); ok {
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (c *Collection) setWriteErr(err error) {
+	if err == nil {
+		return
+	}
+	if c.getWriteErr() != nil {
+		return
+	}
+	c.writeErr.Store(err)
+}
+
 func (c *Collection) EncodeCommand(command *Command) error {
 
-	em := encPool.Get().(*EncoderMachine)
-	defer encPool.Put(em)
-	em.Buffer.Reset()
-
-	// err := em.Enc.Encode(command)
-	err := json2.MarshalEncode(em.Enc2, command)
-	// err := json2.MarshalWrite(em.Buffer, command)
-	if err != nil {
+	if c.writerClosed.Load() {
+		return fmt.Errorf("collection is closed")
+	}
+	if err := c.getWriteErr(); err != nil {
 		return err
 	}
 
-	b := em.Buffer.Bytes()
-	c.encoderMutex.Lock()
-	c.buffer.Write(b)
-	//	c.file.Write(b)
-	c.encoderMutex.Unlock()
+	em := encPool.Get().(*EncoderMachine)
+	em.Buffer.Reset()
+
+	err := json2.MarshalEncode(em.Enc2, command)
+	if err != nil {
+		encPool.Put(em)
+		return err
+	}
+
+	var sendErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				encPool.Put(em)
+				sendErr = fmt.Errorf("collection is closed")
+			}
+		}()
+		c.writerQueue <- em
+	}()
+	if sendErr != nil {
+		return sendErr
+	}
+
+	if err := c.getWriteErr(); err != nil {
+		return err
+	}
+
 	return nil
 }

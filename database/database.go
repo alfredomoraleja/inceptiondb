@@ -6,7 +6,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fulldump/inceptiondb/collection"
@@ -89,6 +91,14 @@ func (db *Database) Load() error {
 	if err != nil {
 		return err
 	}
+
+	type collectionEntry struct {
+		name     string
+		filename string
+	}
+
+	entries := []collectionEntry{}
+
 	err = filepath.WalkDir(dir, func(filename string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -101,15 +111,7 @@ func (db *Database) Load() error {
 		name = strings.TrimPrefix(name, dir)
 		name = strings.TrimPrefix(name, "/")
 
-		t0 := time.Now()
-		col, err := collection.OpenCollection(filename)
-		if err != nil {
-			fmt.Printf("ERROR: open collection '%s': %s\n", filename, err.Error()) // todo: move to logger
-			return err
-		}
-		fmt.Println(name, len(col.Rows), time.Since(t0)) // todo: move to logger
-
-		db.Collections[name] = col
+		entries = append(entries, collectionEntry{name: name, filename: filename})
 
 		return nil
 	})
@@ -117,6 +119,62 @@ func (db *Database) Load() error {
 	if err != nil {
 		db.status = StatusClosing
 		return err
+	}
+
+	collections := make(map[string]*collection.Collection, len(entries))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var firstErr error
+	var errOnce sync.Once
+
+	workerLimit := runtime.NumCPU()
+	if workerLimit < 1 {
+		workerLimit = 1
+	}
+	sem := make(chan struct{}, workerLimit)
+
+	for _, entry := range entries {
+		entry := entry
+		wg.Add(1)
+		go func() {
+			sem <- struct{}{}
+			defer func() {
+				<-sem
+				wg.Done()
+			}()
+
+			t0 := time.Now()
+			col, err := collection.OpenCollection(entry.filename)
+			if err != nil {
+				fmt.Printf("ERROR: open collection '%s': %s\n", entry.filename, err.Error()) // todo: move to logger
+				errOnce.Do(func() {
+					firstErr = err
+				})
+				return
+			}
+			fmt.Println(entry.name, len(col.Rows), time.Since(t0)) // todo: move to logger
+
+			mu.Lock()
+			collections[entry.name] = col
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		for _, col := range collections {
+			col.Close()
+		}
+		db.status = StatusClosing
+		return firstErr
+	}
+
+	for name := range db.Collections {
+		delete(db.Collections, name)
+	}
+	for name, col := range collections {
+		db.Collections[name] = col
 	}
 
 	fmt.Println("Ready")

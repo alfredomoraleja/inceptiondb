@@ -1,7 +1,7 @@
 package collection
 
 import (
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
 	"sync"
 )
@@ -25,7 +25,7 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 
 	item := map[string]interface{}{}
 
-	err := json.Unmarshal(row.Payload, &item)
+	err := json2.Unmarshal(row.Payload, &item)
 	if err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
@@ -58,7 +58,7 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 func (i *IndexMap) AddRow(row *Row) error {
 
 	item := map[string]interface{}{}
-	err := json.Unmarshal(row.Payload, &item)
+	err := json2.Unmarshal(row.Payload, &item)
 	if err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
@@ -116,7 +116,7 @@ type IndexMapTraverse struct {
 func (i *IndexMap) Traverse(optionsData []byte, f func(row *Row) bool) {
 
 	options := &IndexMapTraverse{}
-	json.Unmarshal(optionsData, options) // todo: handle error
+	json2.Unmarshal(optionsData, options) // todo: handle error
 
 	i.RWmutex.RLock()
 	row, ok := i.Entries[options.Value]

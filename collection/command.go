@@ -1,13 +1,13 @@
 package collection
 
 import (
-	"encoding/json"
+	json2 "encoding/json/v2"
 )
 
 type Command struct {
-	Name      string          `json:"name"`
-	Uuid      string          `json:"uuid"`
-	Timestamp int64           `json:"timestamp"`
-	StartByte int64           `json:"start_byte"`
-	Payload   json.RawMessage `json:"payload"`
+	Name      string           `json:"name"`
+	Uuid      string           `json:"uuid"`
+	Timestamp int64            `json:"timestamp"`
+	StartByte int64            `json:"start_byte"`
+	Payload   json2.RawMessage `json:"payload"`
 }

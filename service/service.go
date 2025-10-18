@@ -1,7 +1,7 @@
 package service
 
 import (
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -71,7 +71,7 @@ func (s *Service) Insert(name string, data io.Reader) error {
 		return ErrorCollectionNotFound
 	}
 
-	jsonReader := json.NewDecoder(data)
+	jsonReader := json2.NewDecoder(data)
 
 	for {
 		item := map[string]interface{}{}

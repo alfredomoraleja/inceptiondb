@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,8 +35,8 @@ func insertStream(ctx context.Context, w http.ResponseWriter, r *http.Request) e
 
 	FullDuplex(w, func(w io.Writer) {
 
-		jsonWriter := json.NewEncoder(w)
-		jsonReader := json.NewDecoder(r.Body)
+		jsonWriter := json2.NewEncoder(w)
+		jsonReader := json2.NewDecoder(r.Body)
 
 		// w.WriteHeader(http.StatusCreated)
 

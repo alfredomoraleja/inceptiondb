@@ -505,7 +505,7 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		return fmt.Errorf("normalize patch: %w", err)
 	}
 
-	newValue, changed, err := applyMergePatchValue(originalValue, normalizedPatch)
+	newValue, diffValue, changed, err := applyMergePatchValue(originalValue, normalizedPatch)
 	if err != nil {
 		return fmt.Errorf("cannot apply patch: %w", err)
 	}
@@ -514,7 +514,7 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		return nil
 	}
 
-	newPayload, err := json.Marshal(newValue)
+	newPayload, err := json2.Marshal(newValue)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
@@ -536,13 +536,12 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		return nil
 	}
 
-	diffValue, hasDiff := createMergeDiff(originalValue, newValue)
-	if !hasDiff {
+	if diffValue == nil {
 		return nil
 	}
 
 	// Persist
-	payload, err := json.Marshal(map[string]interface{}{
+	payload, err := json2.Marshal(map[string]interface{}{
 		"i":    row.I,
 		"diff": diffValue,
 	})
@@ -567,7 +566,7 @@ func decodeJSONValue(raw json.RawMessage) (interface{}, error) {
 	}
 
 	var value interface{}
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := json2.Unmarshal(raw, &value); err != nil {
 		return nil, err
 	}
 	return value, nil
@@ -577,37 +576,61 @@ func normalizeJSONValue(value interface{}) (interface{}, error) {
 
 	switch v := value.(type) {
 	case json.RawMessage:
+		if v == nil {
+			return nil, nil
+		}
+
 		var decoded interface{}
-		if err := json.Unmarshal(v, &decoded); err != nil {
+		if err := json2.Unmarshal(v, &decoded); err != nil {
 			return nil, err
 		}
 		return normalizeJSONValue(decoded)
 	case map[string]interface{}:
-		normalized := make(map[string]interface{}, len(v))
+		var normalized map[string]interface{}
 		for key, item := range v {
 			nv, err := normalizeJSONValue(item)
 			if err != nil {
 				return nil, err
 			}
-			normalized[key] = nv
+			if nv != item {
+				if normalized == nil {
+					normalized = make(map[string]interface{}, len(v))
+					for k, original := range v {
+						normalized[k] = original
+					}
+				}
+				normalized[key] = nv
+			}
 		}
-		return normalized, nil
+		if normalized != nil {
+			return normalized, nil
+		}
+		return v, nil
 	case []interface{}:
-		normalized := make([]interface{}, len(v))
+		var normalized []interface{}
 		for i, item := range v {
 			nv, err := normalizeJSONValue(item)
 			if err != nil {
 				return nil, err
 			}
-			normalized[i] = nv
+			if nv != item {
+				if normalized == nil {
+					normalized = make([]interface{}, len(v))
+					copy(normalized, v)
+				}
+				normalized[i] = nv
+			}
 		}
-		return normalized, nil
+		if normalized != nil {
+			return normalized, nil
+		}
+		return v, nil
 	default:
 		return v, nil
 	}
 }
 
-func applyMergePatchValue(original interface{}, patch interface{}) (interface{}, bool, error) {
+func applyMergePatchValue(original interface{}, patch interface{}) (interface{}, interface{}, bool, error) {
 
 	switch p := patch.(type) {
 	case map[string]interface{}:
@@ -616,173 +639,163 @@ func applyMergePatchValue(original interface{}, patch interface{}) (interface{},
 			originalMap = m
 		}
 
-		result := make(map[string]interface{}, len(originalMap)+len(p))
-		for k, v := range originalMap {
-			result[k] = cloneJSONValue(v)
+		var result map[string]interface{}
+		if originalMap != nil {
+			result = originalMap
+		} else {
+			result = make(map[string]interface{}, len(p))
 		}
 
+		var diff map[string]interface{}
 		changed := false
+
+		if originalMap == nil && original != nil {
+			changed = true
+		}
+
 		for k, item := range p {
 			if item == nil {
 				if _, exists := result[k]; exists {
 					delete(result, k)
 					changed = true
+					if diff == nil {
+						diff = make(map[string]interface{})
+					}
+					diff[k] = nil
 				}
 				continue
 			}
 
-			originalValue := interface{}(nil)
+			var originalValue interface{}
+			var exists bool
 			if originalMap != nil {
-				originalValue, _ = originalMap[k]
+				originalValue, exists = originalMap[k]
 			}
 
-			mergedValue, valueChanged, err := applyMergePatchValue(originalValue, item)
+			mergedValue, childDiff, valueChanged, err := applyMergePatchValue(originalValue, item)
 			if err != nil {
-				return nil, false, err
-			}
-
-			if originalMap == nil {
-				changed = true
-			} else {
-				if _, exists := originalMap[k]; !exists || valueChanged {
-					changed = true
-				}
+				return nil, nil, false, err
 			}
 
 			result[k] = mergedValue
-		}
 
-		return result, changed, nil
-	case []interface{}:
-		cloned := cloneJSONArray(p)
-		if current, ok := original.([]interface{}); ok {
-			if reflect.DeepEqual(current, cloned) {
-				return cloned, false, nil
-			}
-		}
-		return cloned, true, nil
-	default:
-		if reflect.DeepEqual(original, p) {
-			return cloneJSONValue(p), false, nil
-		}
-		return cloneJSONValue(p), true, nil
-	}
-}
-
-func createMergeDiff(original interface{}, modified interface{}) (interface{}, bool) {
-
-	switch o := original.(type) {
-	case map[string]interface{}:
-		modifiedMap, ok := modified.(map[string]interface{})
-		if !ok {
-			if reflect.DeepEqual(original, modified) {
-				return nil, false
-			}
-			return cloneJSONValue(modified), true
-		}
-
-		diff := make(map[string]interface{})
-		changed := false
-
-		for k := range o {
-			if _, exists := modifiedMap[k]; !exists {
-				diff[k] = nil
-				changed = true
-			}
-		}
-
-		for k, mv := range modifiedMap {
-			ov, exists := o[k]
 			if !exists {
-				diff[k] = cloneJSONValue(mv)
-				changed = true
+				if !changed {
+					changed = true
+				}
+				if diff == nil {
+					diff = make(map[string]interface{})
+				}
+				if childDiff == nil {
+					childDiff = mergedValue
+				}
+				diff[k] = childDiff
 				continue
 			}
 
-			if om, ok := ov.(map[string]interface{}); ok {
-				if mm, ok := mv.(map[string]interface{}); ok {
-					subDiff, subChanged := createMergeDiff(om, mm)
-					if subChanged {
-						diff[k] = subDiff
-						changed = true
-					}
-					continue
+			if valueChanged {
+				if diff == nil {
+					diff = make(map[string]interface{})
 				}
-			}
-
-			if oa, ok := ov.([]interface{}); ok {
-				if ma, ok := mv.([]interface{}); ok {
-					if !reflect.DeepEqual(oa, ma) {
-						diff[k] = cloneJSONValue(mv)
-						changed = true
-					}
-					continue
+				if childDiff == nil {
+					childDiff = mergedValue
 				}
-			}
-
-			if !reflect.DeepEqual(ov, mv) {
-				diff[k] = cloneJSONValue(mv)
+				diff[k] = childDiff
 				changed = true
+			}
+		}
+
+		if originalMap == nil {
+			if !changed {
+				if len(result) > 0 {
+					changed = true
+					diff = make(map[string]interface{}, len(result))
+					for k, v := range result {
+						diff[k] = v
+					}
+				} else if original != nil {
+					changed = true
+				}
+			} else if diff == nil {
+				diff = make(map[string]interface{}, len(result))
+				for k, v := range result {
+					diff[k] = v
+				}
 			}
 		}
 
 		if !changed {
-			return nil, false
+			return original, nil, false, nil
 		}
-		return diff, true
-	case []interface{}:
-		if ma, ok := modified.([]interface{}); ok {
-			if reflect.DeepEqual(o, ma) {
-				return nil, false
+
+		if diff == nil {
+			diff = make(map[string]interface{}, len(result))
+			for k, v := range result {
+				diff[k] = v
 			}
-			return cloneJSONValue(ma), true
 		}
-		if reflect.DeepEqual(original, modified) {
-			return nil, false
-		}
-		return cloneJSONValue(modified), true
-	default:
-		if reflect.DeepEqual(original, modified) {
-			return nil, false
-		}
-		return cloneJSONValue(modified), true
-	}
-}
 
-func cloneJSONValue(value interface{}) interface{} {
-
-	switch v := value.(type) {
-	case map[string]interface{}:
-		cloned := make(map[string]interface{}, len(v))
-		for k, item := range v {
-			cloned[k] = cloneJSONValue(item)
-		}
-		return cloned
+		return result, diff, true, nil
 	case []interface{}:
-		return cloneJSONArray(v)
-	case json.RawMessage:
-		if v == nil {
-			return nil
+		if arr, ok := original.([]interface{}); ok && jsonValuesEqual(arr, p) {
+			return arr, nil, false, nil
 		}
-		cloned := make(json.RawMessage, len(v))
-		copy(cloned, v)
-		return cloned
+		cloned := append([]interface{}(nil), p...)
+		return cloned, cloned, true, nil
 	default:
-		return v
+		if jsonValuesEqual(original, p) {
+			return original, nil, false, nil
+		}
+		return p, p, true, nil
 	}
 }
 
-func cloneJSONArray(values []interface{}) []interface{} {
+func jsonValuesEqual(a, b interface{}) bool {
 
-	if values == nil {
-		return nil
+	switch av := a.(type) {
+	case map[string]interface{}:
+		bv, ok := b.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		if len(av) != len(bv) {
+			return false
+		}
+		for k, avv := range av {
+			bvv, ok := bv[k]
+			if !ok || !jsonValuesEqual(avv, bvv) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		bv, ok := b.([]interface{})
+		if !ok {
+			return false
+		}
+		if len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !jsonValuesEqual(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	case float64:
+		bv, ok := b.(float64)
+		return ok && av == bv
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	case nil:
+		return b == nil
+	default:
+		return reflect.DeepEqual(a, b)
 	}
-
-	cloned := make([]interface{}, len(values))
-	for i, item := range values {
-		cloned[i] = cloneJSONValue(item)
-	}
-	return cloned
 }
 
 func (c *Collection) Close() error {

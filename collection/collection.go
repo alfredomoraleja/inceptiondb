@@ -3,12 +3,15 @@ package collection
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/json/jsontext"
 	json2 "encoding/json/v2"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -70,6 +73,44 @@ var encPool = sync.Pool{
 	},
 }
 
+var commandPool = sync.Pool{
+	New: func() any {
+		return &Command{}
+	},
+}
+
+func getCommand() *Command {
+	cmd := commandPool.Get().(*Command)
+	*cmd = Command{}
+	return cmd
+}
+
+func putCommand(cmd *Command) {
+	*cmd = Command{}
+	commandPool.Put(cmd)
+}
+
+func readCommandLine(reader *bufio.Reader) ([]byte, error) {
+	var buf []byte
+	for {
+		part, err := reader.ReadSlice('\n')
+		buf = append(buf, part...)
+		if err == nil {
+			return buf, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if len(buf) > 0 {
+				return buf, io.EOF
+			}
+			return nil, io.EOF
+		}
+		return nil, err
+	}
+}
+
 func OpenCollection(filename string) (*Collection, error) {
 
 	// TODO: initialize, read all file and apply its changes into memory
@@ -77,6 +118,12 @@ func OpenCollection(filename string) (*Collection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open file for read: %w", err)
 	}
+
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+	}()
 
 	collection := &Collection{
 		Rows:         []*Row{},
@@ -86,88 +133,231 @@ func OpenCollection(filename string) (*Collection, error) {
 		encoderMutex: &sync.Mutex{},
 	}
 
-	j := jsontext.NewDecoder(f,
-		jsontext.AllowDuplicateNames(true),
-		jsontext.AllowInvalidUTF8(true),
-	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	command := &Command{}
+	reader := bufio.NewReaderSize(f, 16*1024*1024)
 
-	for {
-		command.Payload = nil
+	type parseJob struct {
+		seq  int
+		data []byte
+	}
 
-		err := json2.UnmarshalDecode(j, &command)
-		if err == io.EOF {
-			break
+	type parseResult struct {
+		seq     int
+		command *Command
+		err     error
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
+
+	jobs := make(chan parseJob, workers*2)
+	results := make(chan parseResult, workers*4)
+	readErrCh := make(chan error, 1)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				cmd := getCommand()
+				err := json2.Unmarshal(job.data, cmd)
+				if err != nil {
+					putCommand(cmd)
+					select {
+					case results <- parseResult{seq: job.seq, err: err}:
+					case <-ctx.Done():
+					}
+					continue
+				}
+
+				select {
+				case results <- parseResult{seq: job.seq, command: cmd}:
+				case <-ctx.Done():
+					putCommand(cmd)
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		var readErr error
+		seq := 0
+	readLoop:
+		for {
+			if ctx.Err() != nil {
+				readErr = ctx.Err()
+				break
+			}
+
+			chunk, err := readCommandLine(reader)
+			if err != nil && !errors.Is(err, io.EOF) {
+				readErr = err
+				break
+			}
+
+			trimmed := bytes.TrimSpace(chunk)
+			if len(trimmed) == 0 {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			data := append([]byte(nil), trimmed...)
+
+			select {
+			case jobs <- parseJob{seq: seq, data: data}:
+				seq++
+			case <-ctx.Done():
+				readErr = ctx.Err()
+				break readLoop
+			}
+
+			if errors.Is(err, io.EOF) {
+				break
+			}
 		}
-		if err != nil {
-			// todo: try a best effort?
-			return nil, fmt.Errorf("decode json: %w", err)
+
+		readErrCh <- readErr
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	pending := make(map[int]parseResult)
+	nextSeq := 0
+	var processErr error
+
+	for res := range results {
+		if processErr != nil {
+			if res.command != nil {
+				putCommand(res.command)
+			}
+			continue
 		}
 
-		switch command.Name {
-		case "insert":
-			_, err := collection.addRow(command.Payload)
-			if err != nil {
-				return nil, err
-			}
-		case "drop_index":
-			dropIndexCommand := &DropIndexCommand{}
-			json.Unmarshal(command.Payload, dropIndexCommand) // Todo: handle error properly
+		pending[res.seq] = res
 
-			err := collection.dropIndex(dropIndexCommand.Name, false)
-			if err != nil {
-				fmt.Printf("WARNING: drop index '%s': %s\n", dropIndexCommand.Name, err.Error())
-				// TODO: stop process? if error might get inconsistent state
-			}
-		case "index": // todo: rename to create_index
-			indexCommand := &CreateIndexCommand{}
-			json.Unmarshal(command.Payload, indexCommand) // Todo: handle error properly
-
-			var options interface{}
-
-			switch indexCommand.Type {
-			case "map":
-				options = &IndexMapOptions{}
-				utils.Remarshal(indexCommand.Options, options)
-			case "btree":
-				options = &IndexBTreeOptions{}
-				utils.Remarshal(indexCommand.Options, options)
-			default:
-				return nil, fmt.Errorf("index command: unexpected type '%s' instead of [map|btree]", indexCommand.Type)
+		for {
+			current, ok := pending[nextSeq]
+			if !ok {
+				break
 			}
 
-			err := collection.createIndex(indexCommand.Name, options, false)
-			if err != nil {
-				fmt.Printf("WARNING: create index '%s': %s\n", indexCommand.Name, err.Error())
+			delete(pending, nextSeq)
+
+			if current.err != nil {
+				processErr = fmt.Errorf("decode json: %w", current.err)
+				cancel()
+				break
 			}
-		case "remove":
-			params := struct {
-				I int
-			}{}
-			json.Unmarshal(command.Payload, &params) // Todo: handle error properly
-			row := collection.Rows[params.I]         // this access is threadsafe, OpenCollection is a secuence
-			err := collection.removeByRow(row, false)
-			if err != nil {
-				fmt.Printf("WARNING: remove row %d: %s\n", params.I, err.Error())
+
+			cmd := current.command
+			var handlerErr error
+
+			switch cmd.Name {
+			case "insert":
+				_, handlerErr = collection.addRow(cmd.Payload)
+			case "drop_index":
+				dropIndexCommand := &DropIndexCommand{}
+				json.Unmarshal(cmd.Payload, dropIndexCommand) // Todo: handle error properly
+
+				err := collection.dropIndex(dropIndexCommand.Name, false)
+				if err != nil {
+					fmt.Printf("WARNING: drop index '%s': %s\n", dropIndexCommand.Name, err.Error())
+				}
+			case "index": // todo: rename to create_index
+				indexCommand := &CreateIndexCommand{}
+				json.Unmarshal(cmd.Payload, indexCommand) // Todo: handle error properly
+
+				var options interface{}
+
+				switch indexCommand.Type {
+				case "map":
+					options = &IndexMapOptions{}
+					utils.Remarshal(indexCommand.Options, options)
+				case "btree":
+					options = &IndexBTreeOptions{}
+					utils.Remarshal(indexCommand.Options, options)
+				default:
+					handlerErr = fmt.Errorf("index command: unexpected type '%s' instead of [map|btree]", indexCommand.Type)
+				}
+
+				if handlerErr == nil {
+					err := collection.createIndex(indexCommand.Name, options, false)
+					if err != nil {
+						fmt.Printf("WARNING: create index '%s': %s\n", indexCommand.Name, err.Error())
+					}
+				}
+			case "remove":
+				params := struct {
+					I int
+				}{}
+				json.Unmarshal(cmd.Payload, &params) // Todo: handle error properly
+				row := collection.Rows[params.I]     // this access is threadsafe, OpenCollection is a secuence
+				err := collection.removeByRow(row, false)
+				if err != nil {
+					fmt.Printf("WARNING: remove row %d: %s\n", params.I, err.Error())
+				}
+			case "patch":
+				params := struct {
+					I    int
+					Diff map[string]interface{}
+				}{}
+				json.Unmarshal(cmd.Payload, &params)
+				row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
+				err := collection.patchByRow(row, params.Diff, false)
+				if err != nil {
+					fmt.Printf("WARNING: patch item %d: %s\n", params.I, err.Error())
+				}
+			case "set_defaults":
+				defaults := map[string]any{}
+				json.Unmarshal(cmd.Payload, &defaults)
+				collection.setDefaults(defaults, false)
 			}
-		case "patch":
-			params := struct {
-				I    int
-				Diff map[string]interface{}
-			}{}
-			json.Unmarshal(command.Payload, &params)
-			row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
-			err := collection.patchByRow(row, params.Diff, false)
-			if err != nil {
-				fmt.Printf("WARNING: patch item %d: %s\n", params.I, err.Error())
+
+			putCommand(cmd)
+
+			if handlerErr != nil {
+				processErr = handlerErr
+				cancel()
+				break
 			}
-		case "set_defaults":
-			defaults := map[string]any{}
-			json.Unmarshal(command.Payload, &defaults)
-			collection.setDefaults(defaults, false)
+
+			nextSeq++
+		}
+
+		if processErr != nil {
+			for _, pendingRes := range pending {
+				if pendingRes.command != nil {
+					putCommand(pendingRes.command)
+				}
+			}
+			pending = map[int]parseResult{}
 		}
 	}
+
+	readErr := <-readErrCh
+	if processErr != nil {
+		return nil, processErr
+	}
+
+	if readErr != nil && !errors.Is(readErr, context.Canceled) {
+		return nil, fmt.Errorf("read commands: %w", readErr)
+	}
+
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close read file: %w", err)
+	}
+	f = nil
 
 	// Open file for append only
 	// todo: investigate O_SYNC

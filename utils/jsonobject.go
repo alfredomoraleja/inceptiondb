@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"sort"
+	"strconv"
 )
 
 type JSONField struct {
 	Key   string
 	Value interface{}
+	raw   []byte
 }
 
 type JSONObject []JSONField
@@ -70,6 +72,7 @@ func (o *JSONObject) Set(key string, value interface{}) {
 	idx, exists := data.findIndex(key)
 	if exists {
 		data[idx].Value = value
+		data[idx].raw = nil
 		return
 	}
 	data = append(data, JSONField{})
@@ -116,7 +119,7 @@ func (o JSONObject) Clone() JSONObject {
 	}
 	clone := make(JSONObject, len(o))
 	for i, field := range o {
-		clone[i] = JSONField{Key: field.Key, Value: CloneJSONValue(field.Value)}
+		clone[i] = JSONField{Key: field.Key, Value: CloneJSONValue(field.Value), raw: cloneRawMessage(field.raw)}
 	}
 	return clone
 }
@@ -134,21 +137,18 @@ func (o JSONObject) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Grow(len(o) * 16)
 	buf.WriteByte('{')
-	for i, field := range o {
+	for i := range o {
+		field := &o[i]
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		keyBytes, err := json.Marshal(field.Key)
-		if err != nil {
+		if err := writeJSONString(&buf, field.Key); err != nil {
 			return nil, err
 		}
-		buf.Write(keyBytes)
 		buf.WriteByte(':')
-		valueBytes, err := json.Marshal(field.Value)
-		if err != nil {
+		if err := writeJSONValue(&buf, field); err != nil {
 			return nil, err
 		}
-		buf.Write(valueBytes)
 	}
 	buf.WriteByte('}')
 	return buf.Bytes(), nil
@@ -169,7 +169,7 @@ func (o *JSONObject) UnmarshalJSON(data []byte) error {
 		if err != nil {
 			return err
 		}
-		result = append(result, JSONField{Key: k, Value: value})
+		result = append(result, JSONField{Key: k, Value: value, raw: cloneRawMessage(v)})
 	}
 	result.sortInPlace()
 	*o = result
@@ -204,6 +204,7 @@ func NormalizeJSONValue(value interface{}) (interface{}, error) {
 				return nil, err
 			}
 			normalized[i] = JSONField{Key: field.Key, Value: nv}
+			normalized[i].raw = nil
 		}
 		normalized.sortInPlace()
 		return normalized, nil
@@ -238,7 +239,7 @@ func CloneJSONValue(value interface{}) interface{} {
 	case JSONObject:
 		cloned := make(JSONObject, len(v))
 		for i, field := range v {
-			cloned[i] = JSONField{Key: field.Key, Value: CloneJSONValue(field.Value)}
+			cloned[i] = JSONField{Key: field.Key, Value: CloneJSONValue(field.Value), raw: cloneRawMessage(field.raw)}
 		}
 		return cloned
 	case []interface{}:
@@ -264,4 +265,43 @@ func CloneJSONArray(values []interface{}) []interface{} {
 		cloned[i] = CloneJSONValue(item)
 	}
 	return cloned
+}
+
+func writeJSONString(buf *bytes.Buffer, s string) error {
+	buf.WriteString(strconv.Quote(s))
+	return nil
+}
+
+func writeJSONValue(buf *bytes.Buffer, field *JSONField) error {
+	if field.raw != nil {
+		buf.Write(field.raw)
+		return nil
+	}
+	encoded, err := marshalJSONValue(field.Value)
+	if err != nil {
+		return err
+	}
+	field.raw = encoded
+	buf.Write(encoded)
+	return nil
+}
+
+func marshalJSONValue(value interface{}) ([]byte, error) {
+	switch v := value.(type) {
+	case nil:
+		return []byte("null"), nil
+	case json.RawMessage:
+		return cloneRawMessage(v), nil
+	default:
+		return json.Marshal(v)
+	}
+}
+
+func cloneRawMessage(m json.RawMessage) []byte {
+	if m == nil {
+		return nil
+	}
+	out := make([]byte, len(m))
+	copy(out, m)
+	return out
 }

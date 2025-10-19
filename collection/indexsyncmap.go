@@ -115,3 +115,19 @@ func (i *IndexSyncMap) Traverse(optionsData []byte, f func(row *Row) bool) {
 
 	f(row.(*Row))
 }
+
+func init() {
+	MustRegisterIndex(&IndexDefinition{
+		Type: "map",
+		NewOptions: func() interface{} {
+			return &IndexMapOptions{}
+		},
+		Builder: func(options interface{}) (Index, error) {
+			opts, ok := options.(*IndexMapOptions)
+			if !ok {
+				return nil, fmt.Errorf("invalid options type %T for map index", options)
+			}
+			return NewIndexSyncMap(opts), nil
+		},
+	})
+}

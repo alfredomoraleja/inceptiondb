@@ -25,17 +25,11 @@ var insertMapPool = sync.Pool{
 }
 
 func getInsertMap() map[string]any {
-	item := insertMapPool.Get().(map[string]any)
-	for k := range item {
-		delete(item, k)
-	}
-	return item
+	return insertMapPool.Get().(map[string]any)
 }
 
 func putInsertMap(item map[string]any) {
-	for k := range item {
-		delete(item, k)
-	}
+	clear(item)
 	insertMapPool.Put(item)
 }
 
@@ -153,15 +147,21 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 				break
 			}
 
-			trimmed := bytes.TrimSpace(chunk)
-			if len(trimmed) == 0 {
+			line := chunk
+			if len(line) > 0 && line[len(line)-1] == '\n' {
+				line = line[:len(line)-1]
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+			}
+			if len(line) == 0 {
 				if errors.Is(err, io.EOF) {
 					break
 				}
 				continue
 			}
 
-			data := append([]byte(nil), trimmed...)
+			data := append([]byte(nil), line...)
 
 			select {
 			case jobs <- parseJob{seq: seq, data: data}:
@@ -184,10 +184,48 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		close(results)
 	}()
 
-	pending := make(map[int]parseResult)
+	pending := make(map[int]*parseResult)
 	nextSeq := 0
 	inserted := 0
 	var processErr error
+
+	flushPending := func() {
+		for _, pendingRes := range pending {
+			if pendingRes.item != nil {
+				putInsertMap(pendingRes.item)
+			}
+		}
+		pending = map[int]*parseResult{}
+	}
+
+	process := func(res *parseResult) error {
+		if res.err != nil {
+			if inserted == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+			return res.err
+		}
+
+		row, err := collection.Insert(res.item)
+		if err != nil {
+			if inserted == 0 {
+				w.WriteHeader(http.StatusConflict)
+			}
+			putInsertMap(res.item)
+			return err
+		}
+
+		if inserted == 0 {
+			w.WriteHeader(http.StatusCreated)
+		}
+
+		w.Write(row.Payload)
+		w.Write([]byte("\n"))
+		inserted++
+		putInsertMap(res.item)
+		nextSeq++
+		return nil
+	}
 
 	for res := range results {
 		if processErr != nil {
@@ -197,55 +235,38 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 			continue
 		}
 
-		pending[res.seq] = res
-
-		for {
-			current, ok := pending[nextSeq]
-			if !ok {
-				break
-			}
-
-			delete(pending, nextSeq)
-
-			if current.err != nil {
-				if inserted == 0 {
-					w.WriteHeader(http.StatusBadRequest)
-				}
-				processErr = current.err
-				cancel()
-				break
-			}
-
-			row, err := collection.Insert(current.item)
-			if err != nil {
-				if inserted == 0 {
-					w.WriteHeader(http.StatusConflict)
-				}
-				putInsertMap(current.item)
+		resCopy := res
+		if resCopy.seq == nextSeq {
+			if err := process(&resCopy); err != nil {
 				processErr = err
 				cancel()
-				break
+				flushPending()
+				continue
 			}
 
-			if inserted == 0 {
-				w.WriteHeader(http.StatusCreated)
-			}
+			for processErr == nil {
+				pendingRes, ok := pending[nextSeq]
+				if !ok {
+					break
+				}
 
-			w.Write(row.Payload)
-			w.Write([]byte("\n"))
-			inserted++
-			putInsertMap(current.item)
-			nextSeq++
-		}
-
-		if processErr != nil {
-			for _, pendingRes := range pending {
-				if pendingRes.item != nil {
-					putInsertMap(pendingRes.item)
+				delete(pending, nextSeq)
+				if err := process(pendingRes); err != nil {
+					processErr = err
+					cancel()
+					flushPending()
+					break
 				}
 			}
-			pending = map[int]parseResult{}
+
+			continue
 		}
+
+		pending[resCopy.seq] = &resCopy
+	}
+
+	if processErr != nil {
+		flushPending()
 	}
 
 	readErr := <-readErrCh

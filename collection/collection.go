@@ -201,15 +201,21 @@ func OpenCollection(filename string) (*Collection, error) {
 				break
 			}
 
-			trimmed := bytes.TrimSpace(chunk)
-			if len(trimmed) == 0 {
+			line := chunk
+			if len(line) > 0 && line[len(line)-1] == '\n' {
+				line = line[:len(line)-1]
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+			}
+			if len(line) == 0 {
 				if errors.Is(err, io.EOF) {
 					break
 				}
 				continue
 			}
 
-			data := append([]byte(nil), trimmed...)
+			data := append([]byte(nil), line...)
 
 			select {
 			case jobs <- parseJob{seq: seq, data: data}:
@@ -232,9 +238,97 @@ func OpenCollection(filename string) (*Collection, error) {
 		close(results)
 	}()
 
-	pending := make(map[int]parseResult)
+	pending := make(map[int]*parseResult)
 	nextSeq := 0
 	var processErr error
+
+	flushPending := func() {
+		for _, pendingRes := range pending {
+			if pendingRes.command != nil {
+				putCommand(pendingRes.command)
+			}
+		}
+		pending = map[int]*parseResult{}
+	}
+
+	process := func(res *parseResult) error {
+		if res.err != nil {
+			return fmt.Errorf("decode json: %w", res.err)
+		}
+
+		cmd := res.command
+		var handlerErr error
+
+		switch cmd.Name {
+		case "insert":
+			_, handlerErr = collection.addRow(cmd.Payload)
+		case "drop_index":
+			dropIndexCommand := &DropIndexCommand{}
+			json.Unmarshal(cmd.Payload, dropIndexCommand) // Todo: handle error properly
+
+			err := collection.dropIndex(dropIndexCommand.Name, false)
+			if err != nil {
+				fmt.Printf("WARNING: drop index '%s': %s\n", dropIndexCommand.Name, err.Error())
+			}
+		case "index": // todo: rename to create_index
+			indexCommand := &CreateIndexCommand{}
+			json.Unmarshal(cmd.Payload, indexCommand) // Todo: handle error properly
+
+			var options interface{}
+
+			switch indexCommand.Type {
+			case "map":
+				options = &IndexMapOptions{}
+				utils.Remarshal(indexCommand.Options, options)
+			case "btree":
+				options = &IndexBTreeOptions{}
+				utils.Remarshal(indexCommand.Options, options)
+			default:
+				handlerErr = fmt.Errorf("index command: unexpected type '%s' instead of [map|btree]", indexCommand.Type)
+			}
+
+			if handlerErr == nil {
+				err := collection.createIndex(indexCommand.Name, options, false)
+				if err != nil {
+					fmt.Printf("WARNING: create index '%s': %s\n", indexCommand.Name, err.Error())
+				}
+			}
+		case "remove":
+			params := struct {
+				I int
+			}{}
+			json.Unmarshal(cmd.Payload, &params) // Todo: handle error properly
+			row := collection.Rows[params.I]     // this access is threadsafe, OpenCollection is a secuence
+			err := collection.removeByRow(row, false)
+			if err != nil {
+				fmt.Printf("WARNING: remove row %d: %s\n", params.I, err.Error())
+			}
+		case "patch":
+			params := struct {
+				I    int
+				Diff map[string]interface{}
+			}{}
+			json.Unmarshal(cmd.Payload, &params)
+			row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
+			err := collection.patchByRow(row, params.Diff, false)
+			if err != nil {
+				fmt.Printf("WARNING: patch item %d: %s\n", params.I, err.Error())
+			}
+		case "set_defaults":
+			defaults := map[string]any{}
+			json.Unmarshal(cmd.Payload, &defaults)
+			collection.setDefaults(defaults, false)
+		}
+
+		putCommand(cmd)
+
+		if handlerErr != nil {
+			return handlerErr
+		}
+
+		nextSeq++
+		return nil
+	}
 
 	for res := range results {
 		if processErr != nil {
@@ -244,105 +338,38 @@ func OpenCollection(filename string) (*Collection, error) {
 			continue
 		}
 
-		pending[res.seq] = res
-
-		for {
-			current, ok := pending[nextSeq]
-			if !ok {
-				break
-			}
-
-			delete(pending, nextSeq)
-
-			if current.err != nil {
-				processErr = fmt.Errorf("decode json: %w", current.err)
+		resCopy := res
+		if resCopy.seq == nextSeq {
+			if err := process(&resCopy); err != nil {
+				processErr = err
 				cancel()
-				break
+				flushPending()
+				continue
 			}
 
-			cmd := current.command
-			var handlerErr error
-
-			switch cmd.Name {
-			case "insert":
-				_, handlerErr = collection.addRow(cmd.Payload)
-			case "drop_index":
-				dropIndexCommand := &DropIndexCommand{}
-				json.Unmarshal(cmd.Payload, dropIndexCommand) // Todo: handle error properly
-
-				err := collection.dropIndex(dropIndexCommand.Name, false)
-				if err != nil {
-					fmt.Printf("WARNING: drop index '%s': %s\n", dropIndexCommand.Name, err.Error())
-				}
-			case "index": // todo: rename to create_index
-				indexCommand := &CreateIndexCommand{}
-				json.Unmarshal(cmd.Payload, indexCommand) // Todo: handle error properly
-
-				var options interface{}
-
-				switch indexCommand.Type {
-				case "map":
-					options = &IndexMapOptions{}
-					utils.Remarshal(indexCommand.Options, options)
-				case "btree":
-					options = &IndexBTreeOptions{}
-					utils.Remarshal(indexCommand.Options, options)
-				default:
-					handlerErr = fmt.Errorf("index command: unexpected type '%s' instead of [map|btree]", indexCommand.Type)
+			for processErr == nil {
+				pendingRes, ok := pending[nextSeq]
+				if !ok {
+					break
 				}
 
-				if handlerErr == nil {
-					err := collection.createIndex(indexCommand.Name, options, false)
-					if err != nil {
-						fmt.Printf("WARNING: create index '%s': %s\n", indexCommand.Name, err.Error())
-					}
+				delete(pending, nextSeq)
+				if err := process(pendingRes); err != nil {
+					processErr = err
+					cancel()
+					flushPending()
+					break
 				}
-			case "remove":
-				params := struct {
-					I int
-				}{}
-				json.Unmarshal(cmd.Payload, &params) // Todo: handle error properly
-				row := collection.Rows[params.I]     // this access is threadsafe, OpenCollection is a secuence
-				err := collection.removeByRow(row, false)
-				if err != nil {
-					fmt.Printf("WARNING: remove row %d: %s\n", params.I, err.Error())
-				}
-			case "patch":
-				params := struct {
-					I    int
-					Diff map[string]interface{}
-				}{}
-				json.Unmarshal(cmd.Payload, &params)
-				row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
-				err := collection.patchByRow(row, params.Diff, false)
-				if err != nil {
-					fmt.Printf("WARNING: patch item %d: %s\n", params.I, err.Error())
-				}
-			case "set_defaults":
-				defaults := map[string]any{}
-				json.Unmarshal(cmd.Payload, &defaults)
-				collection.setDefaults(defaults, false)
 			}
 
-			putCommand(cmd)
-
-			if handlerErr != nil {
-				processErr = handlerErr
-				cancel()
-				break
-			}
-
-			nextSeq++
+			continue
 		}
 
-		if processErr != nil {
-			for _, pendingRes := range pending {
-				if pendingRes.command != nil {
-					putCommand(pendingRes.command)
-				}
-			}
-			pending = map[int]parseResult{}
-		}
+		pending[resCopy.seq] = &resCopy
+	}
+
+	if processErr != nil {
+		flushPending()
 	}
 
 	readErr := <-readErrCh

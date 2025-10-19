@@ -207,6 +207,13 @@ func decodeValue(valueType byte, data []byte) (interface{}, int, error) {
 		bin := make([]byte, l)
 		copy(bin, data[5:5+l])
 		return bin, 4 + 1 + l, nil
+	case 0x07: // objectId
+		if len(data) < 12 {
+			return nil, 0, errors.New("objectid requires 12 bytes")
+		}
+		oid := make([]byte, 12)
+		copy(oid, data[:12])
+		return oid, 12, nil
 	case 0x08: // bool
 		if len(data) < 1 {
 			return nil, 0, errors.New("bool too short")

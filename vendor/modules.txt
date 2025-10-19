@@ -30,3 +30,9 @@ github.com/google/btree
 # github.com/google/uuid v1.6.0
 ## explicit
 github.com/google/uuid
+# golang.org/x/net v0.21.0
+## explicit; go 1.18
+# golang.org/x/sys v0.23.0
+## explicit; go 1.18
+# golang.org/x/text v0.17.0
+## explicit; go 1.18

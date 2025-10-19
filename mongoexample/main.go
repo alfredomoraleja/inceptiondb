@@ -1,0 +1,84 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+func main() {
+	// 1️⃣ Crear contexto con timeout para evitar bloqueos
+	ctx, cancel := context.WithTimeout(context.Background(), 1000000*time.Second)
+	defer cancel()
+
+	// 2️⃣ Conectarse a MongoDB (puede ser local o remoto)
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	if err != nil {
+		log.Fatal("❌ Error conectando a MongoDB:", err)
+	}
+
+	// 3️⃣ Comprobar conexión
+	if err := client.Ping(ctx, nil); err != nil {
+		log.Fatal("❌ No se pudo hacer ping a MongoDB:", err)
+	}
+	fmt.Println("✅ Conectado a MongoDB")
+
+	// 4️⃣ Seleccionar base de datos y colección
+	collection := client.Database("testdb").Collection("hellomongo2")
+
+	// 5️⃣ Insertar un documento
+	doc := bson.M{"name": "Gerardo", "age": 35}
+	insertResult, err := collection.InsertOne(ctx, doc)
+	if err != nil {
+		log.Fatal("❌ Error al insertar documento:", err)
+	}
+	fmt.Println("✅ Documento insertado con _id:", insertResult.InsertedID)
+
+	/* // Mini bench
+		t0 := time.Now()
+		for i := 0; i < 100_000; i++ {
+			doc := bson.M{"name": "Gerardo", "age": i}
+			_, err := collection.InsertOne(ctx, doc)
+			if err != nil {
+				fmt.Println("Error al insertar document:", err)
+			}
+		}
+		fmt.Println("INSERTS:", time.Since(t0))
+	//*/
+
+	// 6️⃣ Buscar un documento
+	var result bson.M
+	filter := bson.M{"name": "Gerardo"}
+	err = collection.FindOne(ctx, filter).Decode(&result)
+	if err == mongo.ErrNoDocuments {
+		fmt.Println("⚠️ No se encontró ningún documento con ese filtro")
+	} else if err != nil {
+		log.Fatal("❌ Error al buscar documento:", err)
+	} else {
+		fmt.Println("✅ Documento encontrado:", result)
+	}
+
+	// Listar documentos
+	cur, err := collection.Find(ctx, bson.M{})
+	if err != nil {
+		log.Fatal("❌ Error al listar documentos:", err)
+	} else {
+		fmt.Println("✅ Listando documentos:", result)
+	}
+	for cur.Next(ctx) {
+		docu := bson.M{}
+		cur.Decode(&docu)
+		fmt.Println(docu)
+	}
+
+	// 7️⃣ Cerrar conexión
+	if err := client.Disconnect(ctx); err != nil {
+		log.Fatal("❌ Error al cerrar conexión:", err)
+	}
+	fmt.Println("🔌 Conexión cerrada")
+}

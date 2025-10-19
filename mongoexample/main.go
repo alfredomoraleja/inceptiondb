@@ -41,7 +41,7 @@ func main() {
 
 	// 6️⃣ Buscar un documento
 	var result bson.M
-	filter := bson.M{}
+	filter := bson.M{"name": "Gerardo"}
 	err = collection.FindOne(ctx, filter).Decode(&result)
 	if err == mongo.ErrNoDocuments {
 		fmt.Println("⚠️ No se encontró ningún documento con ese filtro")
@@ -49,6 +49,19 @@ func main() {
 		log.Fatal("❌ Error al buscar documento:", err)
 	} else {
 		fmt.Println("✅ Documento encontrado:", result)
+	}
+
+	// Listar documentos
+	cur, err := collection.Find(ctx, bson.M{})
+	if err != nil {
+		log.Fatal("❌ Error al listar documentos:", err)
+	} else {
+		fmt.Println("✅ Listando documentos:", result)
+	}
+	for cur.Next(ctx) {
+		docu := bson.M{}
+		cur.Decode(&docu)
+		fmt.Println(docu)
 	}
 
 	// 7️⃣ Cerrar conexión

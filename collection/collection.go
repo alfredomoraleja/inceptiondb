@@ -1,14 +1,12 @@
 package collection
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"encoding/json/jsontext"
 	json2 "encoding/json/v2"
 	"fmt"
 	"io"
-	"os"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -16,16 +14,18 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fulldump/inceptiondb/persistence"
 	"github.com/fulldump/inceptiondb/utils"
 )
 
 type Collection struct {
 	Filename     string // Just informative...
-	file         *os.File
+	store        persistence.Store
+	writer       persistence.Writer
+	driver       persistence.Driver
 	Rows         []*Row
 	rowsMutex    *sync.Mutex
 	Indexes      map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
-	buffer       *bufio.Writer               // TODO: use write buffer to improve performance (x3 in tests)
 	Defaults     map[string]any
 	Count        int64
 	encoderMutex *sync.Mutex
@@ -70,12 +70,11 @@ var encPool = sync.Pool{
 	},
 }
 
-func OpenCollection(filename string) (*Collection, error) {
+func OpenCollection(filename string, driver persistence.Driver) (_ *Collection, err error) {
 
-	// TODO: initialize, read all file and apply its changes into memory
-	f, err := os.OpenFile(filename, os.O_RDONLY|os.O_CREATE, 0666)
+	store, err := driver.Open(filename)
 	if err != nil {
-		return nil, fmt.Errorf("open file for read: %w", err)
+		return nil, fmt.Errorf("open store: %w", err)
 	}
 
 	collection := &Collection{
@@ -84,9 +83,23 @@ func OpenCollection(filename string) (*Collection, error) {
 		Filename:     filename,
 		Indexes:      map[string]*collectionIndex{},
 		encoderMutex: &sync.Mutex{},
+		store:        store,
+		driver:       driver,
 	}
 
-	j := jsontext.NewDecoder(f,
+	defer func() {
+		if err != nil {
+			store.Close()
+		}
+	}()
+
+	reader, err := store.Reader()
+	if err != nil {
+		return nil, fmt.Errorf("open reader: %w", err)
+	}
+	defer reader.Close()
+
+	j := jsontext.NewDecoder(reader,
 		jsontext.AllowDuplicateNames(true),
 		jsontext.AllowInvalidUTF8(true),
 	)
@@ -169,14 +182,12 @@ func OpenCollection(filename string) (*Collection, error) {
 		}
 	}
 
-	// Open file for append only
-	// todo: investigate O_SYNC
-	collection.file, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
+	writer, err := store.Writer()
 	if err != nil {
-		return nil, fmt.Errorf("open file for write: %w", err)
+		return nil, fmt.Errorf("open writer: %w", err)
 	}
 
-	collection.buffer = bufio.NewWriterSize(collection.file, 16*1024*1024)
+	collection.writer = writer
 
 	return collection, nil
 }
@@ -202,7 +213,7 @@ func (c *Collection) addRow(payload json.RawMessage) (*Row, error) {
 
 // TODO: test concurrency
 func (c *Collection) Insert(item map[string]any) (*Row, error) {
-	if c.file == nil {
+	if c.writer == nil {
 		return nil, fmt.Errorf("collection is closed")
 	}
 
@@ -786,16 +797,24 @@ func cloneJSONArray(values []interface{}) []interface{} {
 }
 
 func (c *Collection) Close() error {
-	{
-		err := c.buffer.Flush()
-		if err != nil {
-			return err
+	var firstErr error
+
+	if c.writer != nil {
+		if err := c.writer.Flush(); err != nil {
+			firstErr = err
 		}
 	}
 
-	err := c.file.Close()
-	c.file = nil
-	return err
+	if c.store != nil {
+		if err := c.store.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	c.writer = nil
+	c.store = nil
+
+	return firstErr
 }
 
 func (c *Collection) Drop() error {
@@ -804,7 +823,7 @@ func (c *Collection) Drop() error {
 		return fmt.Errorf("close: %w", err)
 	}
 
-	err = os.Remove(c.Filename)
+	err = c.driver.Remove(c.Filename)
 	if err != nil {
 		return fmt.Errorf("remove: %w", err)
 	}
@@ -864,8 +883,7 @@ func (c *Collection) EncodeCommand(command *Command) error {
 
 	b := em.Buffer.Bytes()
 	c.encoderMutex.Lock()
-	c.buffer.Write(b)
-	//	c.file.Write(b)
-	c.encoderMutex.Unlock()
-	return nil
+	defer c.encoderMutex.Unlock()
+	_, err = c.writer.Write(b)
+	return err
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/fulldump/inceptiondb/collection"
+	"github.com/fulldump/inceptiondb/persistence"
 )
 
 func newTestCollection(t *testing.T) *collection.Collection {
@@ -14,7 +15,7 @@ func newTestCollection(t *testing.T) *collection.Collection {
 
 	dir := t.TempDir()
 	filename := filepath.Join(dir, "collection.jsonl")
-	col, err := collection.OpenCollection(filename)
+	col, err := collection.OpenCollection(filename, persistence.MustDriver(persistence.DefaultDriverName))
 	if err != nil {
 		t.Fatalf("open collection: %v", err)
 	}

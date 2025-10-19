@@ -14,9 +14,10 @@ func TestAcceptance(t *testing.T) {
 
 	biff.Alternative("Setup", func(a *biff.A) {
 
-		db := database.NewDatabase(&database.Config{
+		db, err := database.NewDatabase(&database.Config{
 			Dir: t.TempDir(),
 		})
+		biff.AssertNil(err)
 
 		biff.AssertNil(db.Load())
 		biff.AssertEqual(db.GetStatus(), database.StatusOperating)

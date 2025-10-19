@@ -15,14 +15,48 @@ import (
 	. "github.com/fulldump/biff"
 	"github.com/google/uuid"
 
+	"github.com/fulldump/inceptiondb/persistence"
 	"github.com/fulldump/inceptiondb/utils"
 )
+
+var defaultTestDriver = persistence.MustDriver(persistence.DefaultDriverName)
+
+func openTestCollection(t *testing.T, filename string) *Collection {
+	t.Helper()
+	c, err := OpenCollection(filename, defaultTestDriver)
+	if err != nil {
+		t.Fatalf("open collection: %v", err)
+	}
+	return c
+}
+
+func TestOpenCollectionSnappyPersistence(t *testing.T) {
+	Environment(func(filename string) {
+		driver := persistence.MustDriver("snappy")
+
+		c, err := OpenCollection(filename, driver)
+		AssertNil(err)
+
+		_, err = c.Insert(map[string]any{"hello": "world"})
+		AssertNil(err)
+
+		AssertNil(c.Close())
+
+		c, err = OpenCollection(filename, driver)
+		AssertNil(err)
+		defer c.Close()
+
+		row := map[string]any{}
+		c.FindOne(&row)
+		AssertEqualJson(row, map[string]any{"hello": "world"})
+	})
+}
 
 func TestInsert(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		defer c.Close()
 
 		// Run
@@ -43,7 +77,7 @@ func TestInsert(t *testing.T) {
 func TestCollection_Insert_Concurrency(t *testing.T) {
 	Environment(func(filename string) {
 
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 
 		n := 100
 
@@ -69,7 +103,7 @@ func TestFindOne(t *testing.T) {
 		ioutil.WriteFile(filename, []byte(`{"name":"insert","uuid":"ec59a0e6-8fcb-4c1c-91e5-3dd7df6a0b80","timestamp":1648937091073939741,"start_byte":0,"payload":{"name": "Fulanez"}}`), 0666)
 
 		// Run
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		defer c.Close()
 
 		// Check
@@ -82,7 +116,7 @@ func TestFindOne(t *testing.T) {
 func TestInsert100K(t *testing.T) {
 	Environment(func(filename string) {
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		defer c.Close()
 
 		// Run
@@ -103,7 +137,7 @@ func TestIndex(t *testing.T) {
 	}
 	Environment(func(filename string) {
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Insert(utils.RemarshalMap(&User{"1", "Pablo"}))
 		c.Insert(utils.RemarshalMap(&User{"2", "Sara"}))
 
@@ -139,7 +173,7 @@ func TestInsertAfterIndex(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 
 		// Run
 		c.Index("my-index", &IndexMapOptions{
@@ -163,7 +197,7 @@ func TestIndexMultiValue(t *testing.T) {
 
 		// Setup
 		newUser := &User{"1", []string{"pablo@hotmail.com", "p18@yahoo.com"}}
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Insert(utils.RemarshalMap(newUser))
 
 		// Run
@@ -184,7 +218,7 @@ func TestIndexSparse(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		row, err := c.Insert(map[string]interface{}{"id": "1"})
 
 		// Run
@@ -218,7 +252,7 @@ func TestIndexNonSparse(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Insert(map[string]interface{}{"id": "1"})
 
 		// Run
@@ -241,7 +275,7 @@ func TestCollection_Index_Collision(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Insert(utils.RemarshalMap(&User{"1", "Pablo"}))
 		c.Insert(utils.RemarshalMap(&User{"1", "Sara"}))
 
@@ -260,7 +294,7 @@ func TestPersistenceInsertAndIndex(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Insert(map[string]interface{}{"id": "1", "name": "Pablo", "email": []string{"pablo@email.com", "pablo2018@yahoo.com"}})
 		c.Index("my-index", &IndexMapOptions{
 			Field: "email",
@@ -269,7 +303,7 @@ func TestPersistenceInsertAndIndex(t *testing.T) {
 		c.Close()
 
 		// Run
-		c, _ = OpenCollection(filename)
+		c = openTestCollection(t, filename)
 		user := struct {
 			Id    string
 			Name  string
@@ -287,7 +321,7 @@ func TestPersistenceDelete(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Index("my-index", &IndexMapOptions{
 			Field: "email",
 		})
@@ -299,7 +333,7 @@ func TestPersistenceDelete(t *testing.T) {
 		c.Close()
 
 		// Run
-		c, _ = OpenCollection(filename)
+		c = openTestCollection(t, filename)
 		user := struct {
 			Id    string
 			Name  string
@@ -318,7 +352,7 @@ func TestPersistenceDeleteTwice(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Index("my-index", &IndexMapOptions{
 			Field: "id",
 		})
@@ -327,7 +361,7 @@ func TestPersistenceDeleteTwice(t *testing.T) {
 		c.Close()
 
 		// Run
-		c, _ = OpenCollection(filename)
+		c = openTestCollection(t, filename)
 
 		AssertEqual(len(c.Rows), 0)
 
@@ -340,7 +374,7 @@ func TestPersistenceUpdate(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Index("my-index", &IndexMapOptions{
 			Field: "id",
 		})
@@ -349,7 +383,7 @@ func TestPersistenceUpdate(t *testing.T) {
 		c.Close()
 
 		// Run
-		c, _ = OpenCollection(filename)
+		c = openTestCollection(t, filename)
 		user := struct {
 			Id    string
 			Name  string
@@ -369,7 +403,7 @@ func TestPersistenceUpdate_TwiceOptimization(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		c.Index("my-index", &IndexMapOptions{
 			Field: "id",
 		})
@@ -490,7 +524,7 @@ func TestInsert1M_serial(t *testing.T) {
 
 	Environment(func(filename string) {
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		defer c.Close()
 
 		c.Index("index1", &IndexMapOptions{
@@ -519,7 +553,7 @@ func TestInsert1M_concurrent(t *testing.T) {
 	Environment(func(filename string) {
 
 		// Setup
-		c, _ := OpenCollection(filename)
+		c := openTestCollection(t, filename)
 		defer c.Close()
 
 		c.Index("index1", &IndexMapOptions{

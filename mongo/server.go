@@ -227,7 +227,7 @@ func (s *Server) handleInsert(doc Document) (*Document, error) {
 	if !ok {
 		return nil, fmt.Errorf("collection name must be string")
 	}
-	dbName, _ := s.extractDatabase(doc)
+	// dbName, _ := s.extractDatabase(doc)
 	documentsValue, ok := doc.Get("documents")
 	if !ok {
 		return nil, fmt.Errorf("missing documents array")
@@ -236,10 +236,10 @@ func (s *Server) handleInsert(doc Document) (*Document, error) {
 	if !ok {
 		return nil, fmt.Errorf("documents must be array")
 	}
-	fullName := buildNamespace(dbName, collectionName)
-	col, err := s.svc.GetCollection(fullName)
+	// fullName := buildNamespace(dbName, collectionName)
+	col, err := s.svc.GetCollection(collectionName)
 	if err == service.ErrorCollectionNotFound {
-		col, err = s.svc.CreateCollection(fullName)
+		col, err = s.svc.CreateCollection(collectionName)
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +252,7 @@ func (s *Server) handleInsert(doc Document) (*Document, error) {
 	}
 	inserted := 0
 	for _, raw := range documents {
-		docValue, ok := raw.(Document)
+		docValue, ok := raw.(*Document)
 		if !ok {
 			return nil, fmt.Errorf("document must be bson document")
 		}
@@ -282,8 +282,8 @@ func (s *Server) handleFind(doc Document) (*Document, error) {
 		return nil, fmt.Errorf("collection name must be string")
 	}
 	dbName, _ := s.extractDatabase(doc)
-	fullName := buildNamespace(dbName, collectionName)
-	col, err := s.svc.GetCollection(fullName)
+	// fullName := buildNamespace(dbName, collectionName)
+	col, err := s.svc.GetCollection(collectionName) // fullName
 	if err == service.ErrorCollectionNotFound {
 		return s.emptyCursor(dbName, collectionName), nil
 	}

@@ -13,7 +13,7 @@ import (
 
 func main() {
 	// 1️⃣ Crear contexto con timeout para evitar bloqueos
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1000000*time.Second)
 	defer cancel()
 
 	// 2️⃣ Conectarse a MongoDB (puede ser local o remoto)
@@ -29,7 +29,7 @@ func main() {
 	fmt.Println("✅ Conectado a MongoDB")
 
 	// 4️⃣ Seleccionar base de datos y colección
-	collection := client.Database("testdb").Collection("users")
+	collection := client.Database("testdb").Collection("hellomongo")
 
 	// 5️⃣ Insertar un documento
 	doc := bson.M{"name": "Gerardo", "age": 35}
@@ -41,7 +41,7 @@ func main() {
 
 	// 6️⃣ Buscar un documento
 	var result bson.M
-	filter := bson.M{"name": "Gerardo"}
+	filter := bson.M{}
 	err = collection.FindOne(ctx, filter).Decode(&result)
 	if err == mongo.ErrNoDocuments {
 		fmt.Println("⚠️ No se encontró ningún documento con ese filtro")

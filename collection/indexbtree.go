@@ -196,3 +196,19 @@ func (b *IndexBtree) Traverse(optionsData []byte, f func(*Row) bool) {
 	}
 
 }
+
+func init() {
+	MustRegisterIndex(&IndexDefinition{
+		Type: "btree",
+		NewOptions: func() interface{} {
+			return &IndexBTreeOptions{}
+		},
+		Builder: func(options interface{}) (Index, error) {
+			opts, ok := options.(*IndexBTreeOptions)
+			if !ok {
+				return nil, fmt.Errorf("invalid options type %T for btree index", options)
+			}
+			return NewIndexBTree(opts), nil
+		},
+	})
+}

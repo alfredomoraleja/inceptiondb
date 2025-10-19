@@ -124,20 +124,18 @@ func OpenCollection(filename string) (*Collection, error) {
 			indexCommand := &CreateIndexCommand{}
 			json.Unmarshal(command.Payload, indexCommand) // Todo: handle error properly
 
-			var options interface{}
-
-			switch indexCommand.Type {
-			case "map":
-				options = &IndexMapOptions{}
-				utils.Remarshal(indexCommand.Options, options)
-			case "btree":
-				options = &IndexBTreeOptions{}
-				utils.Remarshal(indexCommand.Options, options)
-			default:
-				return nil, fmt.Errorf("index command: unexpected type '%s' instead of [map|btree]", indexCommand.Type)
+			definition, err := GetIndexDefinitionByType(indexCommand.Type)
+			if err != nil {
+				return nil, fmt.Errorf("index command: %w", err)
 			}
 
-			err := collection.createIndex(indexCommand.Name, options, false)
+			options := definition.NewOptions()
+			err = utils.Remarshal(indexCommand.Options, options)
+			if err != nil {
+				return nil, fmt.Errorf("index command options: %w", err)
+			}
+
+			err = collection.createIndex(indexCommand.Name, options, false)
 			if err != nil {
 				fmt.Printf("WARNING: create index '%s': %s\n", indexCommand.Name, err.Error())
 			}
@@ -340,19 +338,20 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 		return fmt.Errorf("index '%s' already exists", name)
 	}
 
-	index := &collectionIndex{}
+	definition, err := GetIndexDefinitionByOptions(options)
+	if err != nil {
+		return fmt.Errorf("index options: %w", err)
+	}
 
-	switch value := options.(type) {
-	case *IndexMapOptions:
-		index.Type = "map"
-		index.Index = NewIndexSyncMap(value)
-		index.Options = value
-	case *IndexBTreeOptions:
-		index.Type = "btree"
-		index.Index = NewIndexBTree(value)
-		index.Options = value
-	default:
-		return fmt.Errorf("unexpected options parameters, it should be [map|btree]")
+	instance, err := definition.Builder(options)
+	if err != nil {
+		return fmt.Errorf("index builder: %w", err)
+	}
+
+	index := &collectionIndex{
+		Index:   instance,
+		Type:    definition.Type,
+		Options: options,
 	}
 
 	c.Indexes[name] = index

@@ -89,8 +89,17 @@ func (s *Server) handleConnection(conn net.Conn) {
 			}
 			continue
 		}
-		if err := writeMessage(conn, msg.header.RequestID, response); err != nil {
-			log.Printf("mongo: write message error: %v", err)
+		var writeErr error
+		switch msg.header.OpCode {
+		case opMsg:
+			writeErr = writeMessage(conn, msg.header.RequestID, response)
+		case opQuery:
+			writeErr = writeReply(conn, msg.header.RequestID, response)
+		default:
+			writeErr = fmt.Errorf("unsupported response opcode %d", msg.header.OpCode)
+		}
+		if writeErr != nil {
+			log.Printf("mongo: write message error: %v", writeErr)
 			return
 		}
 	}

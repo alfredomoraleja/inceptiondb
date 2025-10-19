@@ -1,16 +1,64 @@
 package apicollectionv1
 
 import (
+	"bufio"
+	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
+	"sync"
+
+	json2 "encoding/json/v2"
 
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/service"
 )
+
+var insertMapPool = sync.Pool{
+	New: func() any {
+		return make(map[string]any)
+	},
+}
+
+func getInsertMap() map[string]any {
+	item := insertMapPool.Get().(map[string]any)
+	for k := range item {
+		delete(item, k)
+	}
+	return item
+}
+
+func putInsertMap(item map[string]any) {
+	for k := range item {
+		delete(item, k)
+	}
+	insertMapPool.Put(item)
+}
+
+func readNDJSONLine(reader *bufio.Reader) ([]byte, error) {
+	var buf []byte
+	for {
+		part, err := reader.ReadSlice('\n')
+		buf = append(buf, part...)
+		if err == nil {
+			return buf, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if len(buf) > 0 {
+				return buf, io.EOF
+			}
+			return nil, io.EOF
+		}
+		return nil, err
+	}
+}
 
 func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
@@ -37,78 +85,183 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		return err // todo: handle/wrap this properly
 	}
 
-	// READER
+	type parseJob struct {
+		seq  int
+		data []byte
+	}
 
-	// ALT 1
-	jsonReader := json.NewDecoder(r.Body)
+	type parseResult struct {
+		seq  int
+		item map[string]any
+		err  error
+	}
 
-	// ALT 2
-	// jsonReader := jsontext.NewDecoder(r.Body, jsontext.AllowDuplicateNames(true))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	// WRITER
+	reader := bufio.NewReaderSize(r.Body, 16*1024*1024)
 
-	// ALT 1
-	// jsonWriter := json.NewEncoder(w)
+	workers := runtime.GOMAXPROCS(0)
+	if workers < 1 {
+		workers = 1
+	}
 
-	// ALT 2
-	// jsonWriter := jsontext.NewEncoder(w)
+	jobs := make(chan parseJob, workers*2)
+	results := make(chan parseResult, workers*4)
+	readErrCh := make(chan error, 1)
 
-	// ALT 3
-	// not needed
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				item := getInsertMap()
+				err := json2.Unmarshal(job.data, &item)
+				if err != nil {
+					putInsertMap(item)
+					select {
+					case results <- parseResult{seq: job.seq, err: err}:
+					case <-ctx.Done():
+					}
+					continue
+				}
 
-	// item := map[string]any{} // Idea: same item and clean on each iteration
-	for i := 0; true; i++ {
-		item := map[string]any{}
-		// READER:ALT 1
-		err := jsonReader.Decode(&item)
-		// READER:ALT 2
-		// err := json2.UnmarshalDecode(jsonReader, &item)
-		if err == io.EOF {
-			if i == 0 {
-				w.WriteHeader(http.StatusNoContent)
+				select {
+				case results <- parseResult{seq: job.seq, item: item}:
+				case <-ctx.Done():
+					putInsertMap(item)
+				}
 			}
-			return nil
-		}
-		if err != nil {
-			// TODO: handle error properly
-			fmt.Println("ERROR:", err.Error())
-			if i == 0 {
-				w.WriteHeader(http.StatusBadRequest)
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		var readErr error
+		seq := 0
+	readLoop:
+		for {
+			if ctx.Err() != nil {
+				readErr = ctx.Err()
+				break
 			}
-			return err
-		}
-		row, err := collection.Insert(item)
-		if err != nil {
-			// TODO: handle error properly
-			if i == 0 {
-				w.WriteHeader(http.StatusConflict)
+
+			chunk, err := readNDJSONLine(reader)
+			if err != nil && !errors.Is(err, io.EOF) {
+				readErr = err
+				break
 			}
-			return err
+
+			trimmed := bytes.TrimSpace(chunk)
+			if len(trimmed) == 0 {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				continue
+			}
+
+			data := append([]byte(nil), trimmed...)
+
+			select {
+			case jobs <- parseJob{seq: seq, data: data}:
+				seq++
+			case <-ctx.Done():
+				readErr = ctx.Err()
+				break readLoop
+			}
+
+			if errors.Is(err, io.EOF) {
+				break
+			}
 		}
 
-		if i == 0 {
-			w.WriteHeader(http.StatusCreated)
+		readErrCh <- readErr
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	pending := make(map[int]parseResult)
+	nextSeq := 0
+	inserted := 0
+	var processErr error
+
+	for res := range results {
+		if processErr != nil {
+			if res.item != nil {
+				putInsertMap(res.item)
+			}
+			continue
 		}
 
-		// ALT 1
-		// jsonWriter.Encode(row.Payload)
+		pending[res.seq] = res
 
-		// ALT 2
-		// json2.MarshalEncode(jsonWriter, row.Payload,
-		// jsontext.AllowDuplicateNames(true),
-		// jsontext.AllowInvalidUTF8(true),
-		// )
+		for {
+			current, ok := pending[nextSeq]
+			if !ok {
+				break
+			}
 
-		// ALT 3
-		w.Write(row.Payload)
-		w.Write([]byte("\n"))
+			delete(pending, nextSeq)
 
-		// ALT 4
-		// query param to optionally write nothing
+			if current.err != nil {
+				if inserted == 0 {
+					w.WriteHeader(http.StatusBadRequest)
+				}
+				processErr = current.err
+				cancel()
+				break
+			}
 
-		// for k := range item {
-		// 	delete(item, k)
-		// }
+			row, err := collection.Insert(current.item)
+			if err != nil {
+				if inserted == 0 {
+					w.WriteHeader(http.StatusConflict)
+				}
+				putInsertMap(current.item)
+				processErr = err
+				cancel()
+				break
+			}
+
+			if inserted == 0 {
+				w.WriteHeader(http.StatusCreated)
+			}
+
+			w.Write(row.Payload)
+			w.Write([]byte("\n"))
+			inserted++
+			putInsertMap(current.item)
+			nextSeq++
+		}
+
+		if processErr != nil {
+			for _, pendingRes := range pending {
+				if pendingRes.item != nil {
+					putInsertMap(pendingRes.item)
+				}
+			}
+			pending = map[int]parseResult{}
+		}
+	}
+
+	readErr := <-readErrCh
+	if processErr != nil {
+		return processErr
+	}
+
+	if readErr != nil && !errors.Is(readErr, context.Canceled) {
+		if inserted == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+		}
+		return readErr
+	}
+
+	if inserted == 0 {
+		w.WriteHeader(http.StatusNoContent)
 	}
 
 	return nil

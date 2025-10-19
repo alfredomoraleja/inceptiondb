@@ -11,6 +11,7 @@ import (
 
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/service"
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 type documentLookupSource struct {
@@ -20,7 +21,7 @@ type documentLookupSource struct {
 
 type documentLookupResponse struct {
 	ID       string                `json:"id"`
-	Document map[string]any        `json:"document"`
+	Document utils.JSONObject      `json:"document"`
 	Source   *documentLookupSource `json:"source,omitempty"`
 }
 
@@ -54,7 +55,7 @@ func getDocument(ctx context.Context) (*documentLookupResponse, error) {
 		return nil, fmt.Errorf("document '%s' not found", documentID)
 	}
 
-	document := map[string]any{}
+	document := utils.JSONObject{}
 	if err := json.Unmarshal(row.Payload, &document); err != nil {
 		return nil, fmt.Errorf("decode document: %w", err)
 	}
@@ -110,11 +111,11 @@ func findRowByID(col *collection.Collection, documentID string) (*collection.Row
 	}
 
 	for _, row := range col.Rows {
-		var item map[string]any
+		var item utils.JSONObject
 		if err := json.Unmarshal(row.Payload, &item); err != nil {
 			continue
 		}
-		value, exists := item["id"]
+		value, exists := item.Get("id")
 		if !exists {
 			continue
 		}

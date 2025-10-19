@@ -29,7 +29,7 @@ func main() {
 	fmt.Println("✅ Conectado a MongoDB")
 
 	// 4️⃣ Seleccionar base de datos y colección
-	collection := client.Database("testdb").Collection("hellomongo")
+	collection := client.Database("testdb").Collection("hellomongo2")
 
 	// 5️⃣ Insertar un documento
 	doc := bson.M{"name": "Gerardo", "age": 35}
@@ -38,6 +38,18 @@ func main() {
 		log.Fatal("❌ Error al insertar documento:", err)
 	}
 	fmt.Println("✅ Documento insertado con _id:", insertResult.InsertedID)
+
+	/* // Mini bench
+		t0 := time.Now()
+		for i := 0; i < 100_000; i++ {
+			doc := bson.M{"name": "Gerardo", "age": i}
+			_, err := collection.InsertOne(ctx, doc)
+			if err != nil {
+				fmt.Println("Error al insertar document:", err)
+			}
+		}
+		fmt.Println("INSERTS:", time.Since(t0))
+	//*/
 
 	// 6️⃣ Buscar un documento
 	var result bson.M

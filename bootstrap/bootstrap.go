@@ -17,6 +17,7 @@ import (
 	"github.com/fulldump/inceptiondb/api"
 	"github.com/fulldump/inceptiondb/configuration"
 	"github.com/fulldump/inceptiondb/database"
+	"github.com/fulldump/inceptiondb/replication"
 	"github.com/fulldump/inceptiondb/service"
 )
 
@@ -28,7 +29,13 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 		Dir: c.Dir,
 	})
 
-	b := api.Build(service.NewService(db), c.Statics, VERSION)
+	var manager *replication.Manager
+	if c.SecondaryOf == "" {
+		manager = replication.NewManager()
+		db.SetCommandPublisher(manager)
+	}
+
+	b := api.Build(service.NewService(db), c.Statics, VERSION, db, manager)
 	if c.EnableCompression {
 		b.WithInterceptors(api.Compression)
 	}
@@ -58,8 +65,19 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 	}
 	log.Println("listening on", c.HttpAddr)
 
+	var secondary *replication.Secondary
+	if c.SecondaryOf != "" {
+		secondary = replication.NewSecondary(db, c.SecondaryOf)
+	}
+
 	stop = func() {
+		if secondary != nil {
+			secondary.Stop()
+		}
 		db.Stop()
+		if manager != nil {
+			manager.Close()
+		}
 		s.Shutdown(context.Background())
 	}
 
@@ -76,6 +94,10 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 	start = func() {
 
 		wg := &sync.WaitGroup{}
+
+		if secondary != nil {
+			secondary.Start()
+		}
 
 		wg.Add(1)
 		go func() {

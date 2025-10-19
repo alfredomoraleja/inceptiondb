@@ -8,11 +8,14 @@ import (
 	"github.com/fulldump/box/boxopenapi"
 
 	"github.com/fulldump/inceptiondb/api/apicollectionv1"
+	"github.com/fulldump/inceptiondb/api/apireplicationv1"
+	"github.com/fulldump/inceptiondb/database"
+	"github.com/fulldump/inceptiondb/replication"
 	"github.com/fulldump/inceptiondb/service"
 	"github.com/fulldump/inceptiondb/statics"
 )
 
-func Build(s service.Servicer, staticsDir, version string) *box.B { // TODO: remove datadir
+func Build(s service.Servicer, staticsDir, version string, db *database.Database, manager *replication.Manager) *box.B { // TODO: remove datadir
 
 	b := box.NewBox()
 
@@ -22,6 +25,11 @@ func Build(s service.Servicer, staticsDir, version string) *box.B { // TODO: rem
 	apicollectionv1.BuildV1Collection(v1, s).
 		WithInterceptors(
 			injectServicer(s),
+		)
+
+	apireplicationv1.Build(v1).
+		WithInterceptors(
+			injectReplication(db, manager),
 		)
 
 	b.Resource("/v1/*").
@@ -71,6 +79,16 @@ func injectServicer(s service.Servicer) box.I {
 	return func(next box.H) box.H {
 		return func(ctx context.Context) {
 			next(apicollectionv1.SetServicer(ctx, s))
+		}
+	}
+}
+
+func injectReplication(db *database.Database, manager *replication.Manager) box.I {
+	return func(next box.H) box.H {
+		return func(ctx context.Context) {
+			ctx = apireplicationv1.SetDatabase(ctx, db)
+			ctx = apireplicationv1.SetManager(ctx, manager)
+			next(ctx)
 		}
 	}
 }

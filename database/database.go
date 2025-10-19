@@ -27,6 +27,7 @@ type Database struct {
 	status      string
 	Collections map[string]*collection.Collection
 	exit        chan struct{}
+	publisher   collection.CommandPublisher
 }
 
 func NewDatabase(config *Config) *Database { // todo: return error?
@@ -57,6 +58,7 @@ func (db *Database) CreateCollection(name string) (*collection.Collection, error
 		return nil, err
 	}
 
+	col.SetCommandPublisher(name, db.publisher)
 	db.Collections[name] = col
 
 	return col, nil
@@ -109,6 +111,7 @@ func (db *Database) Load() error {
 		}
 		fmt.Println(name, len(col.Rows), time.Since(t0)) // todo: move to logger
 
+		col.SetCommandPublisher(name, db.publisher)
 		db.Collections[name] = col
 
 		return nil
@@ -153,4 +156,13 @@ func (db *Database) Stop() error {
 	}
 
 	return lastErr
+}
+
+func (db *Database) SetCommandPublisher(publisher collection.CommandPublisher) {
+
+	db.publisher = publisher
+
+	for name, col := range db.Collections {
+		col.SetCommandPublisher(name, publisher)
+	}
 }

@@ -21,6 +21,7 @@ import (
 
 type Collection struct {
 	Filename     string // Just informative...
+	Name         string
 	file         *os.File
 	Rows         []*Row
 	rowsMutex    *sync.Mutex
@@ -29,6 +30,11 @@ type Collection struct {
 	Defaults     map[string]any
 	Count        int64
 	encoderMutex *sync.Mutex
+	publisher    CommandPublisher
+}
+
+type CommandPublisher interface {
+	PublishCommand(collection string, command []byte)
 }
 
 type collectionIndex struct {
@@ -105,67 +111,9 @@ func OpenCollection(filename string) (*Collection, error) {
 			return nil, fmt.Errorf("decode json: %w", err)
 		}
 
-		switch command.Name {
-		case "insert":
-			_, err := collection.addRow(command.Payload)
-			if err != nil {
-				return nil, err
-			}
-		case "drop_index":
-			dropIndexCommand := &DropIndexCommand{}
-			json.Unmarshal(command.Payload, dropIndexCommand) // Todo: handle error properly
-
-			err := collection.dropIndex(dropIndexCommand.Name, false)
-			if err != nil {
-				fmt.Printf("WARNING: drop index '%s': %s\n", dropIndexCommand.Name, err.Error())
-				// TODO: stop process? if error might get inconsistent state
-			}
-		case "index": // todo: rename to create_index
-			indexCommand := &CreateIndexCommand{}
-			json.Unmarshal(command.Payload, indexCommand) // Todo: handle error properly
-
-			var options interface{}
-
-			switch indexCommand.Type {
-			case "map":
-				options = &IndexMapOptions{}
-				utils.Remarshal(indexCommand.Options, options)
-			case "btree":
-				options = &IndexBTreeOptions{}
-				utils.Remarshal(indexCommand.Options, options)
-			default:
-				return nil, fmt.Errorf("index command: unexpected type '%s' instead of [map|btree]", indexCommand.Type)
-			}
-
-			err := collection.createIndex(indexCommand.Name, options, false)
-			if err != nil {
-				fmt.Printf("WARNING: create index '%s': %s\n", indexCommand.Name, err.Error())
-			}
-		case "remove":
-			params := struct {
-				I int
-			}{}
-			json.Unmarshal(command.Payload, &params) // Todo: handle error properly
-			row := collection.Rows[params.I]         // this access is threadsafe, OpenCollection is a secuence
-			err := collection.removeByRow(row, false)
-			if err != nil {
-				fmt.Printf("WARNING: remove row %d: %s\n", params.I, err.Error())
-			}
-		case "patch":
-			params := struct {
-				I    int
-				Diff map[string]interface{}
-			}{}
-			json.Unmarshal(command.Payload, &params)
-			row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
-			err := collection.patchByRow(row, params.Diff, false)
-			if err != nil {
-				fmt.Printf("WARNING: patch item %d: %s\n", params.I, err.Error())
-			}
-		case "set_defaults":
-			defaults := map[string]any{}
-			json.Unmarshal(command.Payload, &defaults)
-			collection.setDefaults(defaults, false)
+		err := collection.ApplyCommand(command, false)
+		if err != nil {
+			fmt.Printf("WARNING: apply command '%s': %s\n", command.Name, err.Error())
 		}
 	}
 
@@ -812,6 +760,89 @@ func (c *Collection) Drop() error {
 	return nil
 }
 
+func (c *Collection) SetCommandPublisher(name string, publisher CommandPublisher) {
+	c.Name = name
+	c.publisher = publisher
+}
+
+func (c *Collection) ApplyCommand(command *Command, persist bool) error {
+
+	var err error
+
+	switch command.Name {
+	case "insert":
+		_, err = c.addRow(command.Payload)
+	case "drop_index":
+		dropIndexCommand := &DropIndexCommand{}
+		err = json.Unmarshal(command.Payload, dropIndexCommand)
+		if err == nil {
+			err = c.dropIndex(dropIndexCommand.Name, false)
+		}
+	case "index":
+		indexCommand := &CreateIndexCommand{}
+		err = json.Unmarshal(command.Payload, indexCommand)
+		if err == nil {
+			var options interface{}
+			switch indexCommand.Type {
+			case "map":
+				options = &IndexMapOptions{}
+				utils.Remarshal(indexCommand.Options, options)
+			case "btree":
+				options = &IndexBTreeOptions{}
+				utils.Remarshal(indexCommand.Options, options)
+			default:
+				err = fmt.Errorf("index command: unexpected type '%s' instead of [map|btree]", indexCommand.Type)
+			}
+			if err == nil {
+				err = c.createIndex(indexCommand.Name, options, false)
+			}
+		}
+	case "remove":
+		params := struct {
+			I int `json:"i"`
+		}{}
+		err = json.Unmarshal(command.Payload, &params)
+		if err == nil {
+			if params.I < 0 || params.I >= len(c.Rows) {
+				err = fmt.Errorf("remove: row %d out of range", params.I)
+			} else {
+				err = c.removeByRow(c.Rows[params.I], false)
+			}
+		}
+	case "patch":
+		params := struct {
+			I    int                    `json:"i"`
+			Diff map[string]interface{} `json:"diff"`
+		}{}
+		err = json.Unmarshal(command.Payload, &params)
+		if err == nil {
+			if params.I < 0 || params.I >= len(c.Rows) {
+				err = fmt.Errorf("patch: row %d out of range", params.I)
+			} else {
+				err = c.patchByRow(c.Rows[params.I], params.Diff, false)
+			}
+		}
+	case "set_defaults":
+		defaults := map[string]any{}
+		err = json.Unmarshal(command.Payload, &defaults)
+		if err == nil {
+			err = c.setDefaults(defaults, false)
+		}
+	default:
+		err = fmt.Errorf("apply command: unexpected command '%s'", command.Name)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if !persist {
+		return nil
+	}
+
+	return c.EncodeCommand(command)
+}
+
 func (c *Collection) DropIndex(name string) error {
 	return c.dropIndex(name, true)
 }
@@ -867,5 +898,11 @@ func (c *Collection) EncodeCommand(command *Command) error {
 	c.buffer.Write(b)
 	//	c.file.Write(b)
 	c.encoderMutex.Unlock()
+
+	if c.publisher != nil {
+		payload := append([]byte(nil), b...)
+		c.publisher.PublishCommand(c.Name, payload)
+	}
+
 	return nil
 }

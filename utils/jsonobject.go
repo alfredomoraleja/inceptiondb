@@ -3,6 +3,7 @@ package utils
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 )
@@ -155,21 +156,46 @@ func (o JSONObject) MarshalJSON() ([]byte, error) {
 }
 
 func (o *JSONObject) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("null")) {
 		*o = nil
 		return nil
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	token, err := dec.Token()
+	if err != nil {
 		return err
 	}
-	result := make(JSONObject, 0, len(raw))
-	for k, v := range raw {
-		value, err := unmarshalJSONAny(v)
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("json: expected object start")
+	}
+	result := make(JSONObject, 0, 8)
+	for dec.More() {
+		keyToken, err := dec.Token()
 		if err != nil {
 			return err
 		}
-		result = append(result, JSONField{Key: k, Value: value, raw: cloneRawMessage(v)})
+		key, ok := keyToken.(string)
+		if !ok {
+			return fmt.Errorf("json: object key not a string")
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return err
+		}
+		value, err := unmarshalJSONAny(raw)
+		if err != nil {
+			return err
+		}
+		result = append(result, JSONField{Key: key, Value: value, raw: cloneRawMessage(raw)})
+	}
+	token, err = dec.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '}' {
+		return fmt.Errorf("json: expected object end")
 	}
 	result.sortInPlace()
 	*o = result

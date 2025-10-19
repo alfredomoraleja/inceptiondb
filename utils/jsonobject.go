@@ -161,44 +161,20 @@ func (o *JSONObject) UnmarshalJSON(data []byte) error {
 		*o = nil
 		return nil
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok || delim != '{' {
+	parser := jsonByteParser{data: data}
+	parser.skipWhitespace()
+	if !parser.consume('{') {
 		return fmt.Errorf("json: expected object start")
 	}
-	result := make(JSONObject, 0, 8)
-	for dec.More() {
-		keyToken, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return fmt.Errorf("json: object key not a string")
-		}
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return err
-		}
-		value, err := unmarshalJSONAny(raw)
-		if err != nil {
-			return err
-		}
-		result = append(result, JSONField{Key: key, Value: value, raw: cloneRawMessage(raw)})
-	}
-	token, err = dec.Token()
+	obj, err := parser.parseObject()
 	if err != nil {
 		return err
 	}
-	if delim, ok := token.(json.Delim); !ok || delim != '}' {
-		return fmt.Errorf("json: expected object end")
+	parser.skipWhitespace()
+	if !parser.exhausted() {
+		return fmt.Errorf("json: unexpected trailing data")
 	}
-	result.sortInPlace()
-	*o = result
+	*o = obj
 	return nil
 }
 
@@ -330,4 +306,242 @@ func cloneRawMessage(m json.RawMessage) []byte {
 	out := make([]byte, len(m))
 	copy(out, m)
 	return out
+}
+
+type jsonByteParser struct {
+	data []byte
+	pos  int
+}
+
+func (p *jsonByteParser) exhausted() bool {
+	return p.pos >= len(p.data)
+}
+
+func (p *jsonByteParser) skipWhitespace() {
+	for p.pos < len(p.data) {
+		switch p.data[p.pos] {
+		case ' ', '\n', '\r', '\t':
+			p.pos++
+			continue
+		}
+		break
+	}
+}
+
+func (p *jsonByteParser) consume(ch byte) bool {
+	if p.pos < len(p.data) && p.data[p.pos] == ch {
+		p.pos++
+		return true
+	}
+	return false
+}
+
+func (p *jsonByteParser) parseObject() (JSONObject, error) {
+	p.skipWhitespace()
+	if p.consume('}') {
+		return JSONObject{}, nil
+	}
+	result := make(JSONObject, 0, 8)
+	for {
+		p.skipWhitespace()
+		key, err := p.parseString()
+		if err != nil {
+			return nil, err
+		}
+		p.skipWhitespace()
+		if !p.consume(':') {
+			return nil, fmt.Errorf("json: expected colon after object key")
+		}
+		p.skipWhitespace()
+		valueStart := p.pos
+		value, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		fieldRaw := cloneRawMessage(p.data[valueStart:p.pos])
+		result = append(result, JSONField{Key: key, Value: value, raw: fieldRaw})
+		p.skipWhitespace()
+		if p.consume('}') {
+			break
+		}
+		if !p.consume(',') {
+			return nil, fmt.Errorf("json: expected comma after object field")
+		}
+	}
+	result.sortInPlace()
+	return result, nil
+}
+
+func (p *jsonByteParser) parseArray() ([]interface{}, error) {
+	p.skipWhitespace()
+	if p.consume(']') {
+		return []interface{}{}, nil
+	}
+	values := make([]interface{}, 0, 4)
+	for {
+		p.skipWhitespace()
+		val, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, val)
+		p.skipWhitespace()
+		if p.consume(']') {
+			break
+		}
+		if !p.consume(',') {
+			return nil, fmt.Errorf("json: expected comma after array element")
+		}
+	}
+	return values, nil
+}
+
+func (p *jsonByteParser) parseValue() (interface{}, error) {
+	if p.pos >= len(p.data) {
+		return nil, fmt.Errorf("json: unexpected end of input")
+	}
+	switch p.data[p.pos] {
+	case '{':
+		p.pos++
+		obj, err := p.parseObject()
+		if err != nil {
+			return nil, err
+		}
+		return obj, nil
+	case '[':
+		p.pos++
+		arr, err := p.parseArray()
+		if err != nil {
+			return nil, err
+		}
+		return arr, nil
+	case '"':
+		raw, err := p.readStringRaw()
+		if err != nil {
+			return nil, err
+		}
+		str, err := strconv.Unquote(string(raw))
+		if err != nil {
+			return nil, err
+		}
+		return str, nil
+	case 't':
+		if p.matchLiteral("true") {
+			return true, nil
+		}
+	case 'f':
+		if p.matchLiteral("false") {
+			return false, nil
+		}
+	case 'n':
+		if p.matchLiteral("null") {
+			return nil, nil
+		}
+	default:
+		if v, err := p.parseNumber(); err == nil {
+			return v, nil
+		} else {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("json: invalid value at position %d", p.pos)
+}
+
+func (p *jsonByteParser) parseString() (string, error) {
+	raw, err := p.readStringRaw()
+	if err != nil {
+		return "", err
+	}
+	unquoted, err := strconv.Unquote(string(raw))
+	if err != nil {
+		return "", err
+	}
+	return unquoted, nil
+}
+
+func (p *jsonByteParser) readStringRaw() ([]byte, error) {
+	if p.pos >= len(p.data) || p.data[p.pos] != '"' {
+		return nil, fmt.Errorf("json: expected string")
+	}
+	start := p.pos
+	p.pos++
+	for p.pos < len(p.data) {
+		ch := p.data[p.pos]
+		if ch == '\\' {
+			p.pos++
+			if p.pos >= len(p.data) {
+				return nil, fmt.Errorf("json: invalid escape sequence")
+			}
+			p.pos++
+			continue
+		}
+		if ch == '"' {
+			p.pos++
+			raw := p.data[start:p.pos]
+			return raw, nil
+		}
+		if ch < 0x20 {
+			return nil, fmt.Errorf("json: invalid character in string")
+		}
+		p.pos++
+	}
+	return nil, fmt.Errorf("json: unexpected end of string")
+}
+
+func (p *jsonByteParser) matchLiteral(lit string) bool {
+	end := p.pos + len(lit)
+	if end > len(p.data) {
+		return false
+	}
+	if string(p.data[p.pos:end]) == lit {
+		p.pos = end
+		return true
+	}
+	return false
+}
+
+func (p *jsonByteParser) parseNumber() (interface{}, error) {
+	start := p.pos
+	if p.data[p.pos] == '-' {
+		p.pos++
+	}
+	if p.pos >= len(p.data) {
+		return nil, fmt.Errorf("json: invalid number")
+	}
+	if p.data[p.pos] == '0' {
+		p.pos++
+	} else if p.data[p.pos] >= '1' && p.data[p.pos] <= '9' {
+		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
+			p.pos++
+		}
+	} else {
+		return nil, fmt.Errorf("json: invalid number")
+	}
+	if p.pos < len(p.data) && p.data[p.pos] == '.' {
+		p.pos++
+		if p.pos >= len(p.data) || p.data[p.pos] < '0' || p.data[p.pos] > '9' {
+			return nil, fmt.Errorf("json: invalid number")
+		}
+		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
+			p.pos++
+		}
+	}
+	if p.pos < len(p.data) && (p.data[p.pos] == 'e' || p.data[p.pos] == 'E') {
+		p.pos++
+		if p.pos < len(p.data) && (p.data[p.pos] == '+' || p.data[p.pos] == '-') {
+			p.pos++
+		}
+		if p.pos >= len(p.data) || p.data[p.pos] < '0' || p.data[p.pos] > '9' {
+			return nil, fmt.Errorf("json: invalid number")
+		}
+		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
+			p.pos++
+		}
+	}
+	raw := p.data[start:p.pos]
+	value, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil {
+		return nil, err
+	}
+	return value, nil
 }

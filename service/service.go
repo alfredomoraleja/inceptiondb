@@ -33,7 +33,7 @@ func (s *Service) CreateCollection(name string) (*collection.Collection, error) 
 
 	filename := path.Join(s.db.Config.Dir, name)
 
-	collection, err := collection.OpenCollection(filename)
+	collection, err := collection.OpenCollection(filename, s.db.PersistenceDriver())
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/fulldump/inceptiondb/bootstrap"
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/configuration"
+	"github.com/fulldump/inceptiondb/persistence"
 )
 
 func TestPatch(c Config) {
@@ -118,7 +119,7 @@ func TestPatch(c Config) {
 	stop() // Stop the server
 
 	t1 := time.Now()
-	collection.OpenCollection(path.Join(dataDir, collectionName))
+	collection.OpenCollection(path.Join(dataDir, collectionName), persistence.MustDriver(persistence.DefaultDriverName))
 	tookOpen := time.Since(t1)
 	fmt.Println("open took:", tookOpen)
 	fmt.Printf("Throughput Open: %.2f rows/sec\n", float64(c.N)/tookOpen.Seconds())

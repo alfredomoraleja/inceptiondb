@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fulldump/inceptiondb/collection"
+	"github.com/fulldump/inceptiondb/persistence"
 )
 
 const (
@@ -19,7 +20,8 @@ const (
 )
 
 type Config struct {
-	Dir string
+	Dir         string
+	Persistence string
 }
 
 type Database struct {
@@ -27,21 +29,37 @@ type Database struct {
 	status      string
 	Collections map[string]*collection.Collection
 	exit        chan struct{}
+	driver      persistence.Driver
 }
 
-func NewDatabase(config *Config) *Database { // todo: return error?
+func NewDatabase(config *Config) (*Database, error) {
+	driverName := config.Persistence
+	if driverName == "" {
+		driverName = persistence.DefaultDriverName
+	}
+
+	driver, err := persistence.GetDriver(driverName)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Database{
 		Config:      config,
 		status:      StatusOpening,
 		Collections: map[string]*collection.Collection{},
 		exit:        make(chan struct{}),
+		driver:      driver,
 	}
 
-	return s
+	return s, nil
 }
 
 func (db *Database) GetStatus() string {
 	return db.status
+}
+
+func (db *Database) PersistenceDriver() persistence.Driver {
+	return db.driver
 }
 
 func (db *Database) CreateCollection(name string) (*collection.Collection, error) {
@@ -52,7 +70,7 @@ func (db *Database) CreateCollection(name string) (*collection.Collection, error
 	}
 
 	filename := path.Join(db.Config.Dir, name)
-	col, err := collection.OpenCollection(filename)
+	col, err := collection.OpenCollection(filename, db.driver)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +89,7 @@ func (db *Database) DropCollection(name string) error { // TODO: rename drop?
 
 	filename := path.Join(db.Config.Dir, name)
 
-	err := os.Remove(filename)
+	err := db.driver.Remove(filename)
 	if err != nil {
 		return err // TODO: wrap?
 	}
@@ -102,7 +120,7 @@ func (db *Database) Load() error {
 		name = strings.TrimPrefix(name, "/")
 
 		t0 := time.Now()
-		col, err := collection.OpenCollection(filename)
+		col, err := collection.OpenCollection(filename, db.driver)
 		if err != nil {
 			fmt.Printf("ERROR: open collection '%s': %s\n", filename, err.Error()) // todo: move to logger
 			return err

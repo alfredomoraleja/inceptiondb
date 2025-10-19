@@ -24,9 +24,12 @@ var VERSION = "dev"
 
 func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 
-	db := database.NewDatabase(&database.Config{
+	db, err := database.NewDatabase(&database.Config{
 		Dir: c.Dir,
 	})
+	if err != nil {
+		log.Fatalf("create database: %v", err)
+	}
 
 	b := api.Build(service.NewService(db), c.Statics, VERSION)
 	if c.EnableCompression {

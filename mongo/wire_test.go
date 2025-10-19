@@ -68,3 +68,57 @@ func TestWriteReplyEncodesSingleDocument(t *testing.T) {
 		t.Fatalf("expected responseTo 42 got %d", header.ResponseTo)
 	}
 }
+
+func TestReadOpMsgDocumentSequence(t *testing.T) {
+	command := NewDocument("insert", "people", "$db", "test")
+	encodedCommand, err := EncodeDocument(command)
+	if err != nil {
+		t.Fatalf("encode command: %v", err)
+	}
+	doc := NewDocument("_id", int32(1))
+	encodedDoc, err := EncodeDocument(doc)
+	if err != nil {
+		t.Fatalf("encode document: %v", err)
+	}
+	identifier := []byte("documents\x00")
+	sequenceLength := 4 + len(identifier) + len(encodedDoc)
+	totalLength := 16 + 4 + 1 + len(encodedCommand) + 1 + sequenceLength
+	buf := make([]byte, totalLength)
+	binary.LittleEndian.PutUint32(buf[:4], uint32(totalLength))
+	binary.LittleEndian.PutUint32(buf[4:8], 1)
+	binary.LittleEndian.PutUint32(buf[8:12], 0)
+	binary.LittleEndian.PutUint32(buf[12:16], uint32(opMsg))
+	pos := 16
+	binary.LittleEndian.PutUint32(buf[pos:pos+4], 0)
+	pos += 4
+	buf[pos] = 0
+	pos++
+	copy(buf[pos:pos+len(encodedCommand)], encodedCommand)
+	pos += len(encodedCommand)
+	buf[pos] = 1
+	pos++
+	binary.LittleEndian.PutUint32(buf[pos:pos+4], uint32(sequenceLength))
+	pos += 4
+	copy(buf[pos:pos+len(identifier)], identifier)
+	pos += len(identifier)
+	copy(buf[pos:pos+len(encodedDoc)], encodedDoc)
+
+	msg, err := readMessage(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("readMessage: %v", err)
+	}
+	documentsValue, ok := msg.body.Get("documents")
+	if !ok {
+		t.Fatalf("expected documents sequence present")
+	}
+	arr, ok := documentsValue.(Array)
+	if !ok {
+		t.Fatalf("documents should be Array got %T", documentsValue)
+	}
+	if len(arr) != 1 {
+		t.Fatalf("expected one document, got %d", len(arr))
+	}
+	if _, ok := arr[0].(Document); !ok {
+		t.Fatalf("expected array to contain Document, got %T", arr[0])
+	}
+}

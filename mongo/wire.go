@@ -22,9 +22,10 @@ type messageHeader struct {
 }
 
 type opMessage struct {
-	header   messageHeader
-	flagBits uint32
-	body     Document
+	header    messageHeader
+	flagBits  uint32
+	body      Document
+	sequences map[string]Array
 }
 
 func readHeader(r io.Reader) (messageHeader, error) {
@@ -109,7 +110,11 @@ func readOpMsg(header messageHeader, r io.Reader) (*opMessage, error) {
 	}
 	flagBits := binary.LittleEndian.Uint32(payload[:4])
 	pos := 4
-	var doc Document
+	var (
+		doc       Document
+		haveDoc   bool
+		sequences = make(map[string]Array)
+	)
 	for pos < len(payload) {
 		kind := payload[pos]
 		pos++
@@ -128,11 +133,66 @@ func readOpMsg(header messageHeader, r io.Reader) (*opMessage, error) {
 				return nil, err
 			}
 			pos += length
+			haveDoc = true
+		case 1:
+			if pos+4 > len(payload) {
+				return nil, fmt.Errorf("document sequence truncated")
+			}
+			sectionLength := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+			if sectionLength < 5 {
+				return nil, fmt.Errorf("invalid document sequence length %d", sectionLength)
+			}
+			if pos+sectionLength > len(payload) {
+				return nil, fmt.Errorf("document sequence length overflow")
+			}
+			section := payload[pos+4 : pos+sectionLength]
+			pos += sectionLength
+			identifier, consumed := readCString(section)
+			if consumed <= 0 {
+				return nil, fmt.Errorf("invalid identifier in document sequence")
+			}
+			section = section[consumed:]
+			docs := make([]interface{}, 0)
+			for len(section) > 0 {
+				if len(section) < 4 {
+					return nil, fmt.Errorf("document sequence truncated document header")
+				}
+				docLength := int(binary.LittleEndian.Uint32(section[:4]))
+				if docLength <= 0 || docLength > len(section) {
+					return nil, fmt.Errorf("document sequence invalid document length %d", docLength)
+				}
+				d, err := DecodeDocument(section[:docLength])
+				if err != nil {
+					return nil, err
+				}
+				docs = append(docs, d)
+				section = section[docLength:]
+			}
+			sequences[identifier] = NewArray(docs...)
 		default:
 			return nil, fmt.Errorf("unsupported section kind %d", kind)
 		}
 	}
-	return &opMessage{header: header, flagBits: flagBits, body: doc}, nil
+	if !haveDoc {
+		return nil, fmt.Errorf("opMsg missing body document")
+	}
+	if len(sequences) > 0 {
+		// Merge document sequences into the command document.
+		for key, arr := range sequences {
+			replaced := false
+			for i, elem := range doc.Elements {
+				if elem.Key == key {
+					doc.Elements[i].Value = arr
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				doc.Elements = append(doc.Elements, Element{Key: key, Value: arr})
+			}
+		}
+	}
+	return &opMessage{header: header, flagBits: flagBits, body: doc, sequences: sequences}, nil
 }
 
 func readOpQuery(header messageHeader, r io.Reader) (*opMessage, error) {

@@ -2,8 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
-	"io"
+	json2 "encoding/json/v2"
 	"net/http"
 
 	"github.com/fulldump/box"
@@ -13,15 +12,18 @@ import (
 
 func find(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
-	requestBody, err := io.ReadAll(r.Body)
-	if err != nil {
+	buf := getRequestBuffer()
+	defer putRequestBuffer(buf)
+
+	if _, err := buf.ReadFrom(r.Body); err != nil {
 		return err
 	}
+	requestBody := buf.Bytes()
 
 	input := struct {
 		Index *string
 	}{}
-	err = json.Unmarshal(requestBody, &input)
+	err := json2.Unmarshal(requestBody, &input)
 	if err != nil {
 		return err
 	}

@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 
 	"github.com/fulldump/box"
 
@@ -23,7 +23,7 @@ func (l *listIndexesItem) MarshalJSON() ([]byte, error) {
 	}
 	utils.Remarshal(l.Options, &result)
 
-	return json.Marshal(result)
+	return json2.Marshal(result)
 }
 
 func listIndexes(ctx context.Context) ([]*listIndexesItem, error) {

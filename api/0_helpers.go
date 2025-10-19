@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
 	"net/http"
 
@@ -26,7 +26,7 @@ func interceptorPrintError(next box.H) box.H {
 		next(ctx)
 		err := box.GetError(ctx)
 		if nil != err {
-			json.NewEncoder(box.GetResponse(ctx)).Encode(map[string]interface{}{
+			json2.NewEncoder(box.GetResponse(ctx)).Encode(map[string]interface{}{
 				"error": err.Error(),
 			})
 		}
@@ -39,7 +39,7 @@ type PrettyError struct {
 }
 
 func (p PrettyError) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]interface{}{
+	return json2.Marshal(map[string]interface{}{
 		"error": struct {
 			Message     string `json:"message"`
 			Description string `json:"description"`
@@ -81,7 +81,7 @@ func PrettyErrorInterceptor(next box.H) box.H {
 
 		if err == box.ErrResourceNotFound {
 			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json2.NewEncoder(w).Encode(map[string]interface{}{
 				"error": map[string]interface{}{
 					"message":     err.Error(),
 					"description": fmt.Sprintf("resource '%s' not found", box.GetRequest(ctx).URL.String()),
@@ -92,7 +92,7 @@ func PrettyErrorInterceptor(next box.H) box.H {
 
 		if err == box.ErrMethodNotAllowed {
 			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json2.NewEncoder(w).Encode(map[string]interface{}{
 				"error": map[string]interface{}{
 					"message":     err.Error(),
 					"description": fmt.Sprintf("method '%s' not allowed", box.GetRequest(ctx).Method),
@@ -101,9 +101,9 @@ func PrettyErrorInterceptor(next box.H) box.H {
 			return
 		}
 
-		if _, ok := err.(*json.SyntaxError); ok {
+		if _, ok := err.(*json2.SyntaxError); ok {
 			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json2.NewEncoder(w).Encode(map[string]interface{}{
 				"error": map[string]interface{}{
 					"message":     err.Error(),
 					"description": "Malformed JSON",
@@ -113,7 +113,7 @@ func PrettyErrorInterceptor(next box.H) box.H {
 		}
 
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		json2.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"message":     err.Error(),
 				"description": "Unexpected error",

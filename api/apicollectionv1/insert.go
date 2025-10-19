@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -40,7 +40,7 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 	// READER
 
 	// ALT 1
-	jsonReader := json.NewDecoder(r.Body)
+	jsonReader := json2.NewDecoder(r.Body)
 
 	// ALT 2
 	// jsonReader := jsontext.NewDecoder(r.Body, jsontext.AllowDuplicateNames(true))

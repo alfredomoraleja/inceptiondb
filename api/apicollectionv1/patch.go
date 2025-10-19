@@ -2,8 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
-	"io"
+	json2 "encoding/json/v2"
 	"net/http"
 
 	"github.com/SierraSoftworks/connor"
@@ -21,18 +20,21 @@ func patch(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		return err // todo: handle/wrap this properly
 	}
 
-	requestBody, err := io.ReadAll(r.Body)
-	if err != nil {
+	buf := getRequestBuffer()
+	defer putRequestBuffer(buf)
+
+	if _, err := buf.ReadFrom(r.Body); err != nil {
 		return err
 	}
+	requestBody := buf.Bytes()
 
 	patch := struct {
 		Filter map[string]interface{}
 		Patch  interface{}
 	}{}
-	json.Unmarshal(requestBody, &patch) // TODO: handle err
+	json2.Unmarshal(requestBody, &patch) // TODO: handle err
 
-	e := json.NewEncoder(w)
+	e := json2.NewEncoder(w)
 
 	traverse(requestBody, col, func(row *collection.Row) bool {
 
@@ -43,7 +45,7 @@ func patch(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		if hasFilter {
 
 			rowData := map[string]interface{}{}
-			json.Unmarshal(row.Payload, &rowData) // todo: handle error here?
+			json2.Unmarshal(row.Payload, &rowData) // todo: handle error here?
 
 			match, err := connor.Match(patch.Filter, rowData)
 			if err != nil {

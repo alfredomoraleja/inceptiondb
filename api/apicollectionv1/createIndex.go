@@ -2,9 +2,8 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/fulldump/box"
@@ -21,10 +20,13 @@ type CreateIndexRequest struct {
 
 func createIndex(ctx context.Context, r *http.Request) (*listIndexesItem, error) {
 
-	requestBody, err := io.ReadAll(r.Body)
-	if err != nil {
+	buf := getRequestBuffer()
+	defer putRequestBuffer(buf)
+
+	if _, err := buf.ReadFrom(r.Body); err != nil {
 		return nil, err
 	}
+	requestBody := buf.Bytes()
 
 	input := struct {
 		Name string
@@ -33,7 +35,7 @@ func createIndex(ctx context.Context, r *http.Request) (*listIndexesItem, error)
 		"",
 		"", // todo: put default index here (if any)
 	}
-	err = json.Unmarshal(requestBody, &input)
+	err := json2.Unmarshal(requestBody, &input)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +68,7 @@ func createIndex(ctx context.Context, r *http.Request) (*listIndexesItem, error)
 		return nil, fmt.Errorf("unexpected type '%s' instead of [map|btree]", input.Type)
 	}
 
-	err = json.Unmarshal(requestBody, &options)
+	err = json2.Unmarshal(requestBody, &options)
 	if err != nil {
 		return nil, err
 	}

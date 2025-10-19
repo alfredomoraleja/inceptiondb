@@ -2,7 +2,7 @@ package apicollectionv1
 
 import (
 	"context"
-	"encoding/json"
+	json2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,8 +30,8 @@ func insertFullduplex(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		return err // todo: handle/wrap this properly
 	}
 
-	jsonReader := json.NewDecoder(r.Body)
-	jsonWriter := json.NewEncoder(w)
+	jsonReader := json2.NewDecoder(r.Body)
+	jsonWriter := json2.NewEncoder(w)
 
 	flusher, ok := w.(http.Flusher)
 	_ = flusher

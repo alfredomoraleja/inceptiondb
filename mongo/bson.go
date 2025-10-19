@@ -20,11 +20,11 @@ type Document struct {
 
 type Array []interface{}
 
-func NewDocument(values ...interface{}) Document {
+func NewDocument(values ...interface{}) *Document {
 	if len(values)%2 != 0 {
 		panic("NewDocument expects even number of arguments")
 	}
-	doc := Document{Elements: make([]Element, 0, len(values)/2)}
+	doc := &Document{Elements: make([]Element, 0, len(values)/2)}
 	for i := 0; i < len(values); i += 2 {
 		key, ok := values[i].(string)
 		if !ok {
@@ -86,6 +86,8 @@ func convertToInterface(v interface{}) interface{} {
 func normalizeValue(v interface{}) interface{} {
 	switch value := v.(type) {
 	case Document:
+		return &value
+	case *Document:
 		return value
 	case Array:
 		return value
@@ -244,7 +246,7 @@ func readCString(data []byte) (string, int) {
 	return "", -1
 }
 
-func EncodeDocument(doc Document) ([]byte, error) {
+func EncodeDocument(doc *Document) ([]byte, error) {
 	size := 4 + 1
 	for _, e := range doc.Elements {
 		n, err := encodedElementSize(e.Key, e.Value)
@@ -274,13 +276,19 @@ func encodedElementSize(key string, value interface{}) (int, error) {
 	case string:
 		return 1 + len(key) + 1 + 4 + len(v) + 1, nil
 	case Document:
+		b, err := EncodeDocument(&v)
+		if err != nil {
+			return 0, err
+		}
+		return 1 + len(key) + 1 + len(b), nil
+	case *Document:
 		b, err := EncodeDocument(v)
 		if err != nil {
 			return 0, err
 		}
 		return 1 + len(key) + 1 + len(b), nil
 	case Array:
-		doc := Document{Elements: make([]Element, len(v))}
+		doc := &Document{Elements: make([]Element, len(v))}
 		for i, item := range v {
 			doc.Elements[i] = Element{Key: fmt.Sprintf("%d", i), Value: item}
 		}
@@ -322,7 +330,7 @@ func encodeElement(out []byte, key string, value interface{}) (int, error) {
 		copy(out[pos+4:], v)
 		out[pos+4+len(v)] = 0
 		return pos + 4 + len(v) + 1, nil
-	case Document:
+	case *Document:
 		out[0] = 0x03
 		pos := 1 + copy(out[1:], key) + 1
 		b, err := EncodeDocument(v)
@@ -331,10 +339,19 @@ func encodeElement(out []byte, key string, value interface{}) (int, error) {
 		}
 		copy(out[pos:], b)
 		return pos + len(b), nil
+	case Document:
+		out[0] = 0x03
+		pos := 1 + copy(out[1:], key) + 1
+		b, err := EncodeDocument(&v)
+		if err != nil {
+			return 0, err
+		}
+		copy(out[pos:], b)
+		return pos + len(b), nil
 	case Array:
 		out[0] = 0x04
 		pos := 1 + copy(out[1:], key) + 1
-		doc := Document{Elements: make([]Element, len(v))}
+		doc := &Document{Elements: make([]Element, len(v))}
 		for i, item := range v {
 			doc.Elements[i] = Element{Key: fmt.Sprintf("%d", i), Value: item}
 		}

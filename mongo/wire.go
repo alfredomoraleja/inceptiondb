@@ -80,7 +80,7 @@ func readMessage(r io.Reader) (*opMessage, error) {
 	return &opMessage{header: header, flagBits: flagBits, body: doc}, nil
 }
 
-func writeMessage(w io.Writer, responseTo int32, doc Document) error {
+func writeMessage(w io.Writer, responseTo int32, doc *Document) error {
 	body, err := EncodeDocument(doc)
 	if err != nil {
 		return err

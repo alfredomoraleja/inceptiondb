@@ -6,6 +6,6 @@ func Default() *Configuration {
 		HttpAddr:          "127.0.0.1:8080",
 		ShowBanner:        true,
 		EnableCompression: false,
-		MongoAddr:         "",
+		MongoAddr:         "127.0.0.1:27017",
 	}
 }

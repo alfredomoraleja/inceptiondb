@@ -96,7 +96,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}
 }
 
-func (s *Server) handleCommand(doc Document) (Document, error) {
+func (s *Server) handleCommand(doc Document) (*Document, error) {
 	commandName, _, ok := doc.FirstKey()
 	if !ok {
 		return NewDocument("ok", float64(0), "errmsg", "empty command"), nil
@@ -124,7 +124,7 @@ func (s *Server) handleCommand(doc Document) (Document, error) {
 	}
 }
 
-func (s *Server) handleHello(doc Document) Document {
+func (s *Server) handleHello(doc Document) *Document {
 	return NewDocument(
 		"ismaster", true,
 		"isWritablePrimary", true,
@@ -141,7 +141,7 @@ func (s *Server) handleHello(doc Document) Document {
 	)
 }
 
-func (s *Server) handleBuildInfo() Document {
+func (s *Server) handleBuildInfo() *Document {
 	return NewDocument(
 		"version", "0.0.1",
 		"gitVersion", "inceptiondb",
@@ -151,7 +151,7 @@ func (s *Server) handleBuildInfo() Document {
 	)
 }
 
-func (s *Server) handleListDatabases() Document {
+func (s *Server) handleListDatabases() *Document {
 	collections := s.svc.ListCollections()
 	dbSet := map[string]struct{}{}
 	for name := range collections {
@@ -181,7 +181,7 @@ func (s *Server) handleListDatabases() Document {
 	)
 }
 
-func (s *Server) handleListCollections(doc Document) (Document, error) {
+func (s *Server) handleListCollections(doc Document) (*Document, error) {
 	dbName, _ := s.extractDatabase(doc)
 	collections := s.svc.ListCollections()
 	entries := []interface{}{}
@@ -209,7 +209,7 @@ func (s *Server) handleListCollections(doc Document) (Document, error) {
 	return NewDocument("cursor", cursor, "ok", float64(1)), nil
 }
 
-func (s *Server) handleInsert(doc Document) (Document, error) {
+func (s *Server) handleInsert(doc Document) (*Document, error) {
 	collectionValue, ok := doc.Get("insert")
 	if !ok {
 		return nil, fmt.Errorf("missing collection in insert command")
@@ -263,7 +263,7 @@ func (s *Server) handleInsert(doc Document) (Document, error) {
 	), nil
 }
 
-func (s *Server) handleFind(doc Document) (Document, error) {
+func (s *Server) handleFind(doc Document) (*Document, error) {
 	collectionValue, ok := doc.Get("find")
 	if !ok {
 		return nil, fmt.Errorf("missing collection in find command")
@@ -344,7 +344,7 @@ func (s *Server) handleFind(doc Document) (Document, error) {
 	), nil
 }
 
-func (s *Server) emptyCursor(dbName, collection string) Document {
+func (s *Server) emptyCursor(dbName, collection string) *Document {
 	cursor := NewDocument(
 		"firstBatch", NewArray(),
 		"id", int64(0),
@@ -382,19 +382,21 @@ func buildNamespace(db, collection string) string {
 	return fmt.Sprintf("%s.%s", db, collection)
 }
 
-func ensureDocument(value interface{}) Document {
+func ensureDocument(value interface{}) *Document {
 	switch v := value.(type) {
-	case Document:
+	case *Document:
 		return v
+	case Document:
+		return &v
 	case map[string]interface{}:
-		if doc, ok := normalizeValue(v).(Document); ok {
+		if doc, ok := normalizeValue(v).(*Document); ok {
 			return doc
 		}
 		return NewDocument()
 	case nil:
 		return NewDocument()
 	default:
-		if doc, ok := normalizeValue(v).(Document); ok {
+		if doc, ok := normalizeValue(v).(*Document); ok {
 			return doc
 		}
 		return NewDocument()

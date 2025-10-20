@@ -8,7 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fulldump/inceptiondb/collection"
@@ -16,11 +19,14 @@ import (
 )
 
 type Secondary struct {
-	db         *database.Database
-	primaryURL string
-	client     *http.Client
-	stop       chan struct{}
-	done       chan struct{}
+	db           *database.Database
+	primaryURL   string
+	client       *http.Client
+	stop         chan struct{}
+	done         chan struct{}
+	progress     map[string]int64
+	progressMu   sync.RWMutex
+	progressFile string
 }
 
 func NewSecondary(db *database.Database, primaryURL string) *Secondary {
@@ -28,13 +34,19 @@ func NewSecondary(db *database.Database, primaryURL string) *Secondary {
 	if !strings.HasPrefix(primary, "http://") && !strings.HasPrefix(primary, "https://") {
 		primary = "http://" + primary
 	}
-	return &Secondary{
+	s := &Secondary{
 		db:         db,
 		primaryURL: primary,
 		client:     &http.Client{},
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
+		progress:   map[string]int64{},
 	}
+	if db != nil && db.Config != nil {
+		s.progressFile = filepath.Join(db.Config.Dir, ".replication-progress.json")
+	}
+	s.loadProgress()
+	return s
 }
 
 func (s *Secondary) Start() {
@@ -148,21 +160,33 @@ func (s *Secondary) applyEvent(event *Event) error {
 		}
 	}
 
-	if col.LogPosition() > command.StartByte {
+	remoteStart := command.StartByte
+
+	if s.lastApplied(event.Collection) > remoteStart {
 		return nil
 	}
 
 	if err := col.ApplyCommand(&command, true); err != nil {
+		if s.handleOutOfSync(event.Collection, err) {
+			return fmt.Errorf("collection '%s' reset for resync: %w", event.Collection, err)
+		}
 		return fmt.Errorf("apply command on collection '%s': %w", event.Collection, err)
 	}
+
+	s.recordProgress(event.Collection, remoteStart+1)
 
 	return nil
 }
 
 func (s *Secondary) snapshotPositions() map[string]int64 {
-	positions := make(map[string]int64, len(s.db.Collections))
-	for name, col := range s.db.Collections {
-		positions[name] = col.LogPosition()
+	s.progressMu.RLock()
+	defer s.progressMu.RUnlock()
+
+	positions := make(map[string]int64, len(s.progress))
+	for name, position := range s.progress {
+		if position > 0 {
+			positions[name] = position
+		}
 	}
 	return positions
 }
@@ -182,4 +206,107 @@ func isContextError(err error) bool {
 		return isContextError(urlErr.Err)
 	}
 	return false
+}
+
+func (s *Secondary) loadProgress() {
+	if s.progressFile == "" {
+		return
+	}
+
+	data, err := os.ReadFile(s.progressFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Println("replication warning: load progress:", err)
+		}
+		return
+	}
+
+	entries := map[string]int64{}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		fmt.Println("replication warning: decode progress:", err)
+		return
+	}
+
+	s.progressMu.Lock()
+	for name, position := range entries {
+		if position > 0 {
+			s.progress[name] = position
+		}
+	}
+	s.progressMu.Unlock()
+}
+
+func (s *Secondary) saveProgressLocked() {
+	if s.progressFile == "" {
+		return
+	}
+
+	data, err := json.Marshal(s.progress)
+	if err != nil {
+		fmt.Println("replication warning: encode progress:", err)
+		return
+	}
+
+	tmp := s.progressFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		fmt.Println("replication warning: persist progress:", err)
+		return
+	}
+	if err := os.Rename(tmp, s.progressFile); err != nil {
+		fmt.Println("replication warning: finalize progress:", err)
+	}
+}
+
+func (s *Secondary) lastApplied(name string) int64 {
+	s.progressMu.RLock()
+	defer s.progressMu.RUnlock()
+	return s.progress[name]
+}
+
+func (s *Secondary) recordProgress(name string, position int64) {
+	if position <= 0 {
+		return
+	}
+
+	s.progressMu.Lock()
+	if s.progress == nil {
+		s.progress = map[string]int64{}
+	}
+	current := s.progress[name]
+	if position > current {
+		s.progress[name] = position
+		s.saveProgressLocked()
+	}
+	s.progressMu.Unlock()
+}
+
+func (s *Secondary) handleOutOfSync(name string, err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := err.Error()
+	if !strings.Contains(message, "out of range") && !strings.Contains(message, "already exists") && !strings.Contains(message, "does not exist") {
+		return false
+	}
+
+	col, ok := s.db.Collections[name]
+	if ok {
+		_ = col.Close()
+		delete(s.db.Collections, name)
+	}
+
+	if s.db.Config != nil {
+		path := filepath.Join(s.db.Config.Dir, name)
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			fmt.Println("replication warning: reset collection:", removeErr)
+		}
+	}
+
+	s.progressMu.Lock()
+	delete(s.progress, name)
+	s.saveProgressLocked()
+	s.progressMu.Unlock()
+
+	return true
 }

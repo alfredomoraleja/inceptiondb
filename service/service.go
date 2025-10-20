@@ -9,6 +9,7 @@ import (
 
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/database"
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 type Service struct {
@@ -74,7 +75,7 @@ func (s *Service) Insert(name string, data io.Reader) error {
 	jsonReader := json.NewDecoder(data)
 
 	for {
-		item := map[string]interface{}{}
+		item := utils.JSONObject{}
 		err := jsonReader.Decode(&item)
 		if err == io.EOF {
 			return nil

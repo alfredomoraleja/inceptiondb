@@ -46,10 +46,7 @@ func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 		cleaned.Set(field.Key, field.Value)
 	}
 
-	var defaultsMap map[string]any
-	if len(cleaned) > 0 {
-		defaultsMap = cleaned.ToMap()
-	}
+	defaultsMap := newCollectionDefaults()
 
 	err = col.SetDefaults(defaultsMap)
 	if err != nil {

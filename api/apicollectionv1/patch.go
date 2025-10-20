@@ -10,6 +10,7 @@ import (
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/collection"
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 func patch(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -28,7 +29,7 @@ func patch(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
 	patch := struct {
 		Filter map[string]interface{}
-		Patch  interface{}
+		Patch  utils.JSONObject
 	}{}
 	json.Unmarshal(requestBody, &patch) // TODO: handle err
 

@@ -10,6 +10,7 @@ import (
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/service"
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
@@ -58,7 +59,7 @@ func insert(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
 	// item := map[string]any{} // Idea: same item and clean on each iteration
 	for i := 0; true; i++ {
-		item := map[string]any{}
+		item := utils.JSONObject{}
 		// READER:ALT 1
 		err := jsonReader.Decode(&item)
 		// READER:ALT 2

@@ -29,7 +29,7 @@ func main() {
 	c := Config{
 		Test:    "patch",
 		Base:    "",
-		N:       1_000_000,
+		N:       1000,
 		Workers: 16,
 	}
 	goconfig.Read(&c)

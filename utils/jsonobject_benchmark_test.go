@@ -13,8 +13,12 @@ var (
 )
 
 func init() {
-	benchmarkMapData, benchmarkJSONObjectData = buildBenchmarkDocuments(128)
+	benchmarkMapData, benchmarkJSONObjectData = buildBenchmarkDocuments(10)
 	benchmarkJSONPayload = mustMarshal(benchmarkMapData)
+
+	// e := json.NewEncoder(os.Stdout)
+	// e.SetIndent("", "  ")
+	// e.Encode(benchmarkJSONObjectData)
 }
 
 func BenchmarkMapMarshalJSON(b *testing.B) {

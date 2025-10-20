@@ -4,21 +4,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 )
 
 type JSONField struct {
 	Key   string
 	Value interface{}
-	raw   []byte
+	// raw   []byte
 }
 
 type JSONObject []JSONField
-
-func NewJSONObject() JSONObject {
-	return JSONObject{}
-}
 
 func NewJSONObjectFromMap(m map[string]any) JSONObject {
 	if m == nil {
@@ -28,7 +23,6 @@ func NewJSONObjectFromMap(m map[string]any) JSONObject {
 	for k, v := range m {
 		obj = append(obj, JSONField{Key: k, Value: v})
 	}
-	obj.sortInPlace()
 	return obj
 }
 
@@ -37,48 +31,41 @@ func (o JSONObject) Len() int {
 }
 
 func (o JSONObject) findIndex(key string) (int, bool) {
-	low, high := 0, len(o)
-	for low < high {
-		mid := (low + high) / 2
-		switch {
-		case o[mid].Key == key:
-			return mid, true
-		case o[mid].Key < key:
-			low = mid + 1
-		default:
-			high = mid
+	for i, e := range o {
+		if e.Key == key {
+			return i, true
 		}
 	}
-	return low, false
+	return 0, false
 }
 
 func (o JSONObject) Get(key string) (interface{}, bool) {
-	idx, ok := o.findIndex(key)
-	if !ok {
-		return nil, false
+	for _, e := range o {
+		if e.Key == key {
+			return e.Value, true
+		}
 	}
-	return o[idx].Value, true
+	return nil, false
 }
 
 func (o JSONObject) Has(key string) bool {
-	_, ok := o.findIndex(key)
-	return ok
+	for _, e := range o {
+		if e.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *JSONObject) Set(key string, value interface{}) {
-	if o == nil {
-		return
+	for _, e := range *o {
+		if e.Key == key {
+			e.Value = value
+			return
+		}
 	}
 	data := *o
-	idx, exists := data.findIndex(key)
-	if exists {
-		data[idx].Value = value
-		data[idx].raw = nil
-		return
-	}
 	data = append(data, JSONField{})
-	copy(data[idx+1:], data[idx:])
-	data[idx] = JSONField{Key: key, Value: value}
 	*o = data
 }
 
@@ -87,20 +74,16 @@ func (o *JSONObject) Delete(key string) bool {
 		return false
 	}
 	data := *o
-	idx, exists := data.findIndex(key)
-	if !exists {
-		return false
+	for i, field := range data {
+		if field.Key != key {
+			continue
+		}
+		data[i] = data[len(data)-1]
+		data = data[:len(data)-1]
+		*o = data
+		return true
 	}
-	copy(data[idx:], data[idx+1:])
-	data = data[:len(data)-1]
-	*o = data
-	return true
-}
-
-func (o JSONObject) ForEach(fn func(string, interface{})) {
-	for _, field := range o {
-		fn(field.Key, field.Value)
-	}
+	return false
 }
 
 func (o JSONObject) ToMap() map[string]any {
@@ -120,16 +103,20 @@ func (o JSONObject) Clone() JSONObject {
 	}
 	clone := make(JSONObject, len(o))
 	for i, field := range o {
-		clone[i] = JSONField{Key: field.Key, Value: CloneJSONValue(field.Value), raw: cloneRawMessage(field.raw)}
+		clone[i] = JSONField{
+			Key:   field.Key,
+			Value: CloneJSONValue(field.Value),
+			// raw: cloneRawMessage(field.raw),
+		}
 	}
 	return clone
 }
 
-func (o JSONObject) sortInPlace() {
-	sort.Slice(o, func(i, j int) bool {
-		return o[i].Key < o[j].Key
-	})
-}
+// func (o JSONObject) sortInPlace() {
+// 	sort.Slice(o, func(i, j int) bool {
+// 		return o[i].Key < o[j].Key
+// 	})
+// }
 
 func (o JSONObject) MarshalJSON() ([]byte, error) {
 	if o == nil {
@@ -178,70 +165,16 @@ func (o *JSONObject) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func unmarshalJSONAny(data json.RawMessage) (interface{}, error) {
-	var decoded interface{}
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return nil, err
-	}
-	normalized, err := NormalizeJSONValue(decoded)
-	if err != nil {
-		return nil, err
-	}
-	return normalized, nil
-}
-
-func NormalizeJSONValue(value interface{}) (interface{}, error) {
-	switch v := value.(type) {
-	case json.RawMessage:
-		var decoded interface{}
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		return NormalizeJSONValue(decoded)
-	case JSONObject:
-		normalized := make(JSONObject, len(v))
-		for i, field := range v {
-			nv, err := NormalizeJSONValue(field.Value)
-			if err != nil {
-				return nil, err
-			}
-			normalized[i] = JSONField{Key: field.Key, Value: nv}
-			normalized[i].raw = nil
-		}
-		normalized.sortInPlace()
-		return normalized, nil
-	case map[string]interface{}:
-		obj := make(JSONObject, 0, len(v))
-		for k, item := range v {
-			nv, err := NormalizeJSONValue(item)
-			if err != nil {
-				return nil, err
-			}
-			obj = append(obj, JSONField{Key: k, Value: nv})
-		}
-		obj.sortInPlace()
-		return obj, nil
-	case []interface{}:
-		normalized := make([]interface{}, len(v))
-		for i, item := range v {
-			nv, err := NormalizeJSONValue(item)
-			if err != nil {
-				return nil, err
-			}
-			normalized[i] = nv
-		}
-		return normalized, nil
-	default:
-		return v, nil
-	}
-}
-
 func CloneJSONValue(value interface{}) interface{} {
 	switch v := value.(type) {
 	case JSONObject:
 		cloned := make(JSONObject, len(v))
 		for i, field := range v {
-			cloned[i] = JSONField{Key: field.Key, Value: CloneJSONValue(field.Value), raw: cloneRawMessage(field.raw)}
+			cloned[i] = JSONField{
+				Key:   field.Key,
+				Value: CloneJSONValue(field.Value),
+				// raw: cloneRawMessage(field.raw),
+			}
 		}
 		return cloned
 	case []interface{}:
@@ -275,15 +208,15 @@ func writeJSONString(buf *bytes.Buffer, s string) error {
 }
 
 func writeJSONValue(buf *bytes.Buffer, field *JSONField) error {
-	if field.raw != nil {
-		buf.Write(field.raw)
-		return nil
-	}
+	// if field.raw != nil {
+	// 	buf.Write(field.raw)
+	// 	return nil
+	// }
 	encoded, err := marshalJSONValue(field.Value)
 	if err != nil {
 		return err
 	}
-	field.raw = encoded
+	// field.raw = encoded
 	buf.Write(encoded)
 	return nil
 }
@@ -353,13 +286,18 @@ func (p *jsonByteParser) parseObject() (JSONObject, error) {
 			return nil, fmt.Errorf("json: expected colon after object key")
 		}
 		p.skipWhitespace()
-		valueStart := p.pos
+		// valueStart := p.pos
 		value, err := p.parseValue()
 		if err != nil {
 			return nil, err
 		}
-		fieldRaw := cloneRawMessage(p.data[valueStart:p.pos])
-		result = append(result, JSONField{Key: key, Value: value, raw: fieldRaw})
+		// fieldRaw := cloneRawMessage(p.data[valueStart:p.pos])
+		result = append(result, JSONField{
+			Key:   key,
+			Value: value,
+			// raw: fieldRaw,
+		})
+
 		p.skipWhitespace()
 		if p.consume('}') {
 			break
@@ -368,7 +306,6 @@ func (p *jsonByteParser) parseObject() (JSONObject, error) {
 			return nil, fmt.Errorf("json: expected comma after object field")
 		}
 	}
-	result.sortInPlace()
 	return result, nil
 }
 

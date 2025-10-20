@@ -5,16 +5,20 @@ import (
 	"net/http"
 
 	"github.com/fulldump/inceptiondb/service"
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 type createCollectionRequest struct {
-	Name     string         `json:"name"`
-	Defaults map[string]any `json:"defaults"`
+	Name     string           `json:"name"`
+	Defaults utils.JSONObject `json:"defaults"`
 }
 
-func newCollectionDefaults() map[string]any {
-	return map[string]any{
-		"id": "uuid()",
+func newCollectionDefaults() utils.JSONObject {
+	return utils.JSONObject{
+		{
+			Key:   "defaults",
+			Value: "uuid()",
+		},
 	}
 }
 

@@ -201,20 +201,22 @@ func (c *Collection) addRow(payload json.RawMessage) (*Row, error) {
 }
 
 // TODO: test concurrency
-func (c *Collection) Insert(item map[string]any) (*Row, error) {
+func (c *Collection) Insert(item utils.JSONObject) (*Row, error) {
 	if c.file == nil {
 		return nil, fmt.Errorf("collection is closed")
 	}
 
-	normalizedItem, err := utils.NormalizeJSONValue(item)
-	if err != nil {
-		return nil, fmt.Errorf("normalize payload: %w", err)
-	}
+	// normalizedItem, err := utils.NormalizeJSONValue(item)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("normalize payload: %w", err)
+	// }
 
-	doc, ok := normalizedItem.(utils.JSONObject)
-	if !ok {
-		return nil, fmt.Errorf("normalize payload: expected object but got %T", normalizedItem)
-	}
+	// doc, ok := normalizedItem.(utils.JSONObject)
+	// if !ok {
+	// 	return nil, fmt.Errorf("normalize payload: expected object but got %T", normalizedItem)
+	// }
+
+	doc := item
 
 	auto := atomic.AddInt64(&c.Count, 1)
 
@@ -312,18 +314,9 @@ type CreateIndexCommand struct {
 	Options interface{} `json:"options"`
 }
 
-func (c *Collection) SetDefaults(defaults map[string]any) error {
-	normalized, err := utils.NormalizeJSONValue(defaults)
-	if err != nil {
-		return fmt.Errorf("normalize defaults: %w", err)
-	}
+func (c *Collection) SetDefaults(defaults utils.JSONObject) error {
 
-	obj, ok := normalized.(utils.JSONObject)
-	if !ok {
-		return fmt.Errorf("normalize defaults: expected object but got %T", normalized)
-	}
-
-	return c.setDefaults(obj, true)
+	return c.setDefaults(defaults, true)
 }
 
 func (c *Collection) setDefaults(defaults utils.JSONObject, persist bool) error {
@@ -526,12 +519,7 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 		return fmt.Errorf("decode row payload: %w", err)
 	}
 
-	normalizedPatch, err := normalizeJSONValue(patch)
-	if err != nil {
-		return fmt.Errorf("normalize patch: %w", err)
-	}
-
-	newValue, changed, err := applyMergePatchValue(originalValue, normalizedPatch)
+	newValue, changed, err := applyMergePatchValue(originalValue, patch)
 	if err != nil {
 		return fmt.Errorf("cannot apply patch: %w", err)
 	}
@@ -592,39 +580,21 @@ func decodeJSONValue(raw json.RawMessage) (interface{}, error) {
 		return nil, nil
 	}
 
-	var value interface{}
+	var value utils.JSONObject
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return nil, err
 	}
-	return utils.NormalizeJSONValue(value)
-}
-
-func normalizeJSONValue(value interface{}) (interface{}, error) {
-	return utils.NormalizeJSONValue(value)
+	return value, nil
 }
 
 func applyMergePatchValue(original interface{}, patch interface{}) (interface{}, bool, error) {
 
 	switch p := patch.(type) {
-	case map[string]interface{}:
-		normalized, err := utils.NormalizeJSONValue(p)
-		if err != nil {
-			return nil, false, err
-		}
-		return applyMergePatchValue(original, normalized)
 	case utils.JSONObject:
 		var originalObj utils.JSONObject
 		switch o := original.(type) {
 		case utils.JSONObject:
 			originalObj = o
-		case map[string]interface{}:
-			onormalized, err := utils.NormalizeJSONValue(o)
-			if err != nil {
-				return nil, false, err
-			}
-			if obj, ok := onormalized.(utils.JSONObject); ok {
-				originalObj = obj
-			}
 		}
 
 		result := originalObj.Clone()
@@ -676,23 +646,10 @@ func applyMergePatchValue(original interface{}, patch interface{}) (interface{},
 func createMergeDiff(original interface{}, modified interface{}) (interface{}, bool) {
 
 	switch o := original.(type) {
-	case map[string]interface{}:
-		normalized, err := utils.NormalizeJSONValue(o)
-		if err != nil {
-			return utils.CloneJSONValue(modified), true
-		}
-		return createMergeDiff(normalized, modified)
 	case utils.JSONObject:
 		modifiedObj, ok := modified.(utils.JSONObject)
 		if !ok {
-			if m, ok := modified.(map[string]interface{}); ok {
-				normalized, err := utils.NormalizeJSONValue(m)
-				if err == nil {
-					if obj, ok := normalized.(utils.JSONObject); ok {
-						modifiedObj = obj
-					}
-				}
-			}
+			panic("this is absurd")
 		}
 		if modifiedObj == nil {
 			if reflect.DeepEqual(original, modified) {

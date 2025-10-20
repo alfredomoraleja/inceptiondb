@@ -439,15 +439,18 @@ func TestIndexInsert_Rollback(t *testing.T) {
 		}
 	}
 
-	indexes := map[string]*collectionIndex{
-		"a": &collectionIndex{
-			Index: newMock("a"),
+	indexes := []*collectionIndexEntry{
+		{
+			name:  "a",
+			index: &collectionIndex{Index: newMock("a")},
 		},
-		"b": &collectionIndex{
-			Index: newMock("b"),
+		{
+			name:  "b",
+			index: &collectionIndex{Index: newMock("b")},
 		},
-		"c": &collectionIndex{
-			Index: newMock("c"),
+		{
+			name:  "c",
+			index: &collectionIndex{Index: newMock("c")},
 		},
 	}
 
@@ -461,18 +464,19 @@ func TestIndexInsert_Rollback(t *testing.T) {
 
 func TestIndexInsert_Rollback_BlackBox(t *testing.T) {
 
-	indexes := map[string]*collectionIndex{
-		"a": &collectionIndex{
+	row := &Row{
+		Payload: []byte(`{"id":"my-id"}`),
+	}
+
+	entry := &collectionIndexEntry{
+		name: "a",
+		index: &collectionIndex{
 			Index: NewIndexMap(&IndexMapOptions{
 				Field: "id",
 			}),
 		},
 	}
-
-	row := &Row{
-		Payload: []byte(`{"id":"my-id"}`),
-	}
-
+	indexes := []*collectionIndexEntry{entry}
 	err1 := indexInsert(indexes, row)
 	AssertNil(err1)
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/google/btree"
+
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 type IndexBtree struct {
@@ -18,11 +20,13 @@ func (b *IndexBtree) RemoveRow(r *Row) error {
 
 	// TODO: duplicated code:
 	values := []interface{}{}
-	data := map[string]interface{}{}
+	data := utils.JSONObject{}
 	json.Unmarshal(r.Payload, &data)
 
 	for _, field := range b.Options.Fields {
-		values = append(values, data[field])
+		cleanField := strings.TrimPrefix(field, "-")
+		value, _ := data.Get(cleanField)
+		values = append(values, value)
 	}
 
 	b.Btree.Delete(&RowOrdered{
@@ -104,12 +108,12 @@ func NewIndexBTree(options *IndexBTreeOptions) *IndexBtree {
 
 func (b *IndexBtree) AddRow(r *Row) error {
 	var values []interface{}
-	data := map[string]interface{}{}
+	data := utils.JSONObject{}
 	json.Unmarshal(r.Payload, &data)
 
 	for _, field := range b.Options.Fields {
-		field = strings.TrimPrefix(field, "-")
-		value, exists := data[field]
+		cleanField := strings.TrimPrefix(field, "-")
+		value, exists := data.Get(cleanField)
 		if exists {
 			values = append(values, value)
 			continue
@@ -117,7 +121,7 @@ func (b *IndexBtree) AddRow(r *Row) error {
 		if b.Options.Sparse {
 			return nil
 		}
-		return fmt.Errorf("field '%s' not defined", field)
+		return fmt.Errorf("field '%s' not defined", cleanField)
 	}
 
 	if b.Btree.Has(&RowOrdered{Values: values}) {

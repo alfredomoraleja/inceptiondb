@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 // IndexMap should be an interface to allow multiple kinds and implementations
@@ -23,17 +25,16 @@ func NewIndexMap(options *IndexMapOptions) *IndexMap {
 
 func (i *IndexMap) RemoveRow(row *Row) error {
 
-	item := map[string]interface{}{}
+	item := utils.JSONObject{}
 
-	err := json.Unmarshal(row.Payload, &item)
-	if err != nil {
+	if err := json.Unmarshal(row.Payload, &item); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 
 	field := i.Options.Field
 	entries := i.Entries
 
-	itemValue, itemExists := item[field]
+	itemValue, itemExists := item.Get(field)
 	if !itemExists {
 		// Do not index
 		return nil
@@ -44,7 +45,10 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 		delete(entries, value)
 	case []interface{}:
 		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
+			s, ok := v.(string) // TODO: handle this casting error
+			if !ok {
+				return fmt.Errorf("type not supported")
+			}
 			delete(entries, s)
 		}
 	default:
@@ -57,15 +61,14 @@ func (i *IndexMap) RemoveRow(row *Row) error {
 
 func (i *IndexMap) AddRow(row *Row) error {
 
-	item := map[string]interface{}{}
-	err := json.Unmarshal(row.Payload, &item)
-	if err != nil {
+	item := utils.JSONObject{}
+	if err := json.Unmarshal(row.Payload, &item); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 
 	field := i.Options.Field
 
-	itemValue, itemExists := item[field]
+	itemValue, itemExists := item.Get(field)
 	if !itemExists {
 		if i.Options.Sparse {
 			// Do not index
@@ -93,13 +96,19 @@ func (i *IndexMap) AddRow(row *Row) error {
 
 	case []interface{}:
 		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
+			s, ok := v.(string) // TODO: handle this casting error
+			if !ok {
+				return fmt.Errorf("type not supported")
+			}
 			if _, exists := entries[s]; exists {
 				return fmt.Errorf("index conflict: field '%s' with value '%s'", field, value)
 			}
 		}
 		for _, v := range value {
-			s := v.(string) // TODO: handle this casting error
+			s, ok := v.(string) // TODO: handle this casting error
+			if !ok {
+				return fmt.Errorf("type not supported")
+			}
 			entries[s] = row
 		}
 	default:

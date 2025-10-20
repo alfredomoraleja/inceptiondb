@@ -10,4 +10,5 @@ type Configuration struct {
 	ShowBanner        bool   `usage:"show big banner"`
 	ShowConfig        bool   `usage:"print config"`
 	EnableCompression bool   `usage:"enable http compression (gzip)"`
+	SecondaryOf       string `usage:"if set, run as secondary replicating from this primary URL"`
 }

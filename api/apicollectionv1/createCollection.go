@@ -20,6 +20,10 @@ func newCollectionDefaults() map[string]any {
 
 func createCollection(ctx context.Context, w http.ResponseWriter, input *createCollectionRequest) (*CollectionResponse, error) {
 
+	if forwarded, err := forwardWrite(ctx, w, nil); forwarded {
+		return nil, err
+	}
+
 	s := GetServicer(ctx)
 
 	collection, err := s.CreateCollection(input.Name)

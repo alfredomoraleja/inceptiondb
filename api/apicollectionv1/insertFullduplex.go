@@ -14,6 +14,10 @@ import (
 
 func insertFullduplex(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
+	if forwarded, err := forwardWrite(ctx, w, r); forwarded {
+		return err
+	}
+
 	wc := http.NewResponseController(w)
 	wcerr := wc.EnableFullDuplex()
 	if wcerr != nil {

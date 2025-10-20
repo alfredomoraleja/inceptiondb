@@ -19,6 +19,10 @@ import (
 // type one document and press enter
 func insertStream(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
+	if forwarded, err := forwardWrite(ctx, w, r); forwarded {
+		return err
+	}
+
 	s := GetServicer(ctx)
 	collectionName := box.GetUrlParameter(ctx, "collectionName")
 	collection, err := s.GetCollection(collectionName)

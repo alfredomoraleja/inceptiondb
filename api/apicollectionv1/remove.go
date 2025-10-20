@@ -13,6 +13,10 @@ import (
 
 func remove(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
+	if forwarded, err := forwardWrite(ctx, w, r); forwarded {
+		return err
+	}
+
 	requestBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		return err

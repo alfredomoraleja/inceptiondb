@@ -14,6 +14,10 @@ type setDefaultsInput map[string]any
 
 func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
+	if forwarded, err := forwardWrite(ctx, w, r); forwarded {
+		return err
+	}
+
 	s := GetServicer(ctx)
 	collectionName := box.GetUrlParameter(ctx, "collectionName")
 	col, err := s.GetCollection(collectionName)

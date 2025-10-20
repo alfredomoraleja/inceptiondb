@@ -89,6 +89,15 @@ func (s *Secondary) runOnce() error {
 		return err
 	}
 
+	query := req.URL.Query()
+	for name, position := range s.snapshotPositions() {
+		if position <= 0 {
+			continue
+		}
+		query.Add("since", fmt.Sprintf("%s:%d", name, position))
+	}
+	req.URL.RawQuery = query.Encode()
+
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
@@ -139,11 +148,23 @@ func (s *Secondary) applyEvent(event *Event) error {
 		}
 	}
 
+	if col.LogPosition() > command.StartByte {
+		return nil
+	}
+
 	if err := col.ApplyCommand(&command, true); err != nil {
 		return fmt.Errorf("apply command on collection '%s': %w", event.Collection, err)
 	}
 
 	return nil
+}
+
+func (s *Secondary) snapshotPositions() map[string]int64 {
+	positions := make(map[string]int64, len(s.db.Collections))
+	for name, col := range s.db.Collections {
+		positions[name] = col.LogPosition()
+	}
+	return positions
 }
 
 func isContextError(err error) bool {

@@ -15,17 +15,19 @@ import (
 	"github.com/fulldump/inceptiondb/statics"
 )
 
-func Build(s service.Servicer, staticsDir, version string, db *database.Database, manager *replication.Manager) *box.B { // TODO: remove datadir
+func Build(s service.Servicer, staticsDir, version string, db *database.Database, manager *replication.Manager, forwarder apicollectionv1.Forwarder) *box.B { // TODO: remove datadir
 
 	b := box.NewBox()
 
 	v1 := b.Resource("/v1")
 	v1.WithInterceptors(box.SetResponseHeader("Content-Type", "application/json"))
 
-	apicollectionv1.BuildV1Collection(v1, s).
-		WithInterceptors(
-			injectServicer(s),
-		)
+	collectionResource := apicollectionv1.BuildV1Collection(v1, s)
+	interceptors := []box.I{injectServicer(s)}
+	if forwarder != nil {
+		interceptors = append(interceptors, injectForwarder(forwarder))
+	}
+	collectionResource.WithInterceptors(interceptors...)
 
 	apireplicationv1.Build(v1).
 		WithInterceptors(
@@ -79,6 +81,14 @@ func injectServicer(s service.Servicer) box.I {
 	return func(next box.H) box.H {
 		return func(ctx context.Context) {
 			next(apicollectionv1.SetServicer(ctx, s))
+		}
+	}
+}
+
+func injectForwarder(f apicollectionv1.Forwarder) box.I {
+	return func(next box.H) box.H {
+		return func(ctx context.Context) {
+			next(apicollectionv1.SetForwarder(ctx, f))
 		}
 	}
 }

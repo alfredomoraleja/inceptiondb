@@ -31,6 +31,7 @@ type Collection struct {
 	Count        int64
 	encoderMutex *sync.Mutex
 	publisher    CommandPublisher
+	logPosition  int64
 }
 
 type CommandPublisher interface {
@@ -125,6 +126,10 @@ func OpenCollection(filename string) (*Collection, error) {
 	}
 
 	collection.buffer = bufio.NewWriterSize(collection.file, 16*1024*1024)
+
+	if info, statErr := collection.file.Stat(); statErr == nil {
+		atomic.StoreInt64(&collection.logPosition, info.Size())
+	}
 
 	return collection, nil
 }
@@ -884,20 +889,27 @@ func (c *Collection) EncodeCommand(command *Command) error {
 
 	em := encPool.Get().(*EncoderMachine)
 	defer encPool.Put(em)
+
+	c.encoderMutex.Lock()
+	defer c.encoderMutex.Unlock()
+
+	command.StartByte = atomic.LoadInt64(&c.logPosition)
+
 	em.Buffer.Reset()
 
-	// err := em.Enc.Encode(command)
 	err := json2.MarshalEncode(em.Enc2, command)
-	// err := json2.MarshalWrite(em.Buffer, command)
 	if err != nil {
 		return err
 	}
 
 	b := em.Buffer.Bytes()
-	c.encoderMutex.Lock()
-	c.buffer.Write(b)
-	//	c.file.Write(b)
-	c.encoderMutex.Unlock()
+
+	if _, err := c.buffer.Write(b); err != nil {
+		return err
+	}
+
+	nextPosition := command.StartByte + int64(len(b))
+	atomic.StoreInt64(&c.logPosition, nextPosition)
 
 	if c.publisher != nil {
 		payload := append([]byte(nil), b...)
@@ -905,4 +917,8 @@ func (c *Collection) EncodeCommand(command *Command) error {
 	}
 
 	return nil
+}
+
+func (c *Collection) LogPosition() int64 {
+	return atomic.LoadInt64(&c.logPosition)
 }

@@ -29,13 +29,24 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 		Dir: c.Dir,
 	})
 
+	srv := service.NewService(db)
+
 	var manager *replication.Manager
 	if c.SecondaryOf == "" {
 		manager = replication.NewManager()
 		db.SetCommandPublisher(manager)
 	}
 
-	b := api.Build(service.NewService(db), c.Statics, VERSION, db, manager)
+	var (
+		secondary *replication.Secondary
+		forwarder *replication.Forwarder
+	)
+	if c.SecondaryOf != "" {
+		secondary = replication.NewSecondary(db, c.SecondaryOf)
+		forwarder = replication.NewForwarder(c.SecondaryOf)
+	}
+
+	b := api.Build(srv, c.Statics, VERSION, db, manager, forwarder)
 	if c.EnableCompression {
 		b.WithInterceptors(api.Compression)
 	}
@@ -64,11 +75,6 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 		os.Exit(-1)
 	}
 	log.Println("listening on", c.HttpAddr)
-
-	var secondary *replication.Secondary
-	if c.SecondaryOf != "" {
-		secondary = replication.NewSecondary(db, c.SecondaryOf)
-	}
 
 	stop = func() {
 		if secondary != nil {

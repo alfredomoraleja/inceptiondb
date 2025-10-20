@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/database"
@@ -32,6 +34,12 @@ func stream(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("streaming not supported")
 	}
 
+	offsets, err := parseSince(r.URL.Query()["since"])
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid since parameter: %v", err), http.StatusBadRequest)
+		return nil
+	}
+
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -41,7 +49,7 @@ func stream(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 
 	encoder := json.NewEncoder(w)
 
-	if err := sendHistory(r.Context(), db, encoder, flusher); err != nil {
+	if err := sendHistory(r.Context(), db, encoder, flusher, offsets); err != nil {
 		return err
 	}
 
@@ -61,16 +69,16 @@ func stream(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
 	}
 }
 
-func sendHistory(ctx context.Context, db *database.Database, encoder *json.Encoder, flusher http.Flusher) error {
+func sendHistory(ctx context.Context, db *database.Database, encoder *json.Encoder, flusher http.Flusher, offsets map[string]int64) error {
 	for name, col := range db.Collections {
-		if err := streamCollectionHistory(ctx, name, col, encoder, flusher); err != nil {
+		if err := streamCollectionHistory(ctx, name, col, encoder, flusher, offsets[name]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func streamCollectionHistory(ctx context.Context, name string, col *collection.Collection, encoder *json.Encoder, flusher http.Flusher) error {
+func streamCollectionHistory(ctx context.Context, name string, col *collection.Collection, encoder *json.Encoder, flusher http.Flusher, skipUntil int64) error {
 	file, err := os.Open(col.Filename)
 	if err != nil {
 		return fmt.Errorf("open collection '%s': %w", name, err)
@@ -89,12 +97,22 @@ func streamCollectionHistory(ctx context.Context, name string, col *collection.C
 		default:
 		}
 
+		startOffset := decoder.InputOffset()
+
 		command := &collection.Command{}
 		if err := json2.UnmarshalDecode(decoder, command); err != nil {
 			if err == io.EOF {
 				return nil
 			}
 			return fmt.Errorf("decode command: %w", err)
+		}
+
+		if command.StartByte == 0 {
+			command.StartByte = startOffset
+		}
+
+		if skipUntil > 0 && command.StartByte < skipUntil {
+			continue
 		}
 
 		payload, err := json.Marshal(command)
@@ -112,4 +130,29 @@ func streamCollectionHistory(ctx context.Context, name string, col *collection.C
 		}
 		flusher.Flush()
 	}
+}
+
+func parseSince(values []string) (map[string]int64, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	offsets := make(map[string]int64, len(values))
+	for _, value := range values {
+		parts := strings.SplitN(value, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid token %q", value)
+		}
+
+		offset, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid offset for %s", parts[0])
+		}
+
+		if current, exists := offsets[parts[0]]; !exists || offset > current {
+			offsets[parts[0]] = offset
+		}
+	}
+
+	return offsets, nil
 }

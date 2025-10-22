@@ -17,6 +17,7 @@ import (
 	"github.com/fulldump/inceptiondb/api"
 	"github.com/fulldump/inceptiondb/configuration"
 	"github.com/fulldump/inceptiondb/database"
+	"github.com/fulldump/inceptiondb/mysqliface"
 	"github.com/fulldump/inceptiondb/service"
 )
 
@@ -28,7 +29,9 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 		Dir: c.Dir,
 	})
 
-	b := api.Build(service.NewService(db), c.Statics, VERSION)
+	svc := service.NewService(db)
+
+	b := api.Build(svc, c.Statics, VERSION)
 	if c.EnableCompression {
 		b.WithInterceptors(api.Compression)
 	}
@@ -42,6 +45,11 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 	s := &http.Server{
 		Addr:    c.HttpAddr,
 		Handler: box.Box2Http(b),
+	}
+
+	var mysqlServer *mysqliface.Server
+	if c.MySQLAddr != "" {
+		mysqlServer = mysqliface.NewServer(c.MySQLAddr, VERSION, c.MySQLUser, c.MySQLPassword, svc)
 	}
 
 	if c.HttpsSelfsigned {
@@ -59,6 +67,11 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 	log.Println("listening on", c.HttpAddr)
 
 	stop = func() {
+		if mysqlServer != nil {
+			if err := mysqlServer.Stop(); err != nil {
+				fmt.Println(err.Error())
+			}
+		}
 		db.Stop()
 		s.Shutdown(context.Background())
 	}
@@ -99,6 +112,12 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 				fmt.Println(err.Error())
 			}
 		}()
+
+		if mysqlServer != nil {
+			if err := mysqlServer.Start(); err != nil {
+				fmt.Println(err.Error())
+			}
+		}
 
 		wg.Wait()
 	}

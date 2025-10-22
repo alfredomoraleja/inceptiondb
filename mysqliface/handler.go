@@ -26,7 +26,7 @@ var (
 	createCollectionRegexp              = regexp.MustCompile(`(?i)^CREATE\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
 	dropCollectionRegexp                = regexp.MustCompile(`(?i)^DROP\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
 	insertRegexp                        = regexp.MustCompile(`(?i)^INSERT\s+INTO\s+([a-zA-Z0-9_\-]+)(?:\s*\(\s*document\s*\))?\s+VALUES\s*(.+)$`)
-	selectRegexp                        = regexp.MustCompile(`(?i)^SELECT\s+\*\s+FROM\s+([a-zA-Z0-9_\-]+)(?:\s+LIMIT\s+(\d+))?(?:\s+OFFSET\s+(\d+))?$`)
+	selectRegexp                        = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s+FROM\\s+(?:(`[^`]+`|[a-zA-Z0-9_\\-]+)\\.)?(`[^`]+`|[a-zA-Z0-9_\\-]+)(?:\\s+LIMIT\\s+(\\d+))?(?:\\s+OFFSET\\s+(\\d+))?$")
 	informationSchemaTablesSelectRegexp = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+FROM\s+information_schema\.tables\b(.*)$`)
 	quotedStringRegexp                  = regexp.MustCompile(`'([^']*)'`)
 	limitRegexp                         = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)`)
@@ -296,31 +296,45 @@ func (h *handler) handleInformationSchemaTablesSelect(query string) (*mysql.Resu
 
 func (h *handler) handleSelect(query string) (*mysql.Result, error) {
 	matches := selectRegexp.FindStringSubmatch(query)
-	if len(matches) != 4 {
+	if len(matches) != 5 {
 		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only SELECT * FROM <collection> [LIMIT n] [OFFSET m] is supported")
 	}
 
-	name := matches[1]
+	schemaToken := matches[1]
+	tableToken := matches[2]
+
+	schemaName, err := parseIdentifierToken(schemaToken)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid schema identifier")
+	}
+	collectionName, err := parseIdentifierToken(tableToken)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid collection identifier")
+	}
+
+	if schemaName != "" && !strings.EqualFold(schemaName, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, schemaName)
+	}
+
 	limit := 0
 	offset := 0
-	var err error
-	if matches[2] != "" {
-		limit, err = strconv.Atoi(matches[2])
+	if matches[3] != "" {
+		limit, err = strconv.Atoi(matches[3])
 		if err != nil {
 			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid LIMIT value")
 		}
 	}
-	if matches[3] != "" {
-		offset, err = strconv.Atoi(matches[3])
+	if matches[4] != "" {
+		offset, err = strconv.Atoi(matches[4])
 		if err != nil {
 			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid OFFSET value")
 		}
 	}
 
-	col, err := h.svc.GetCollection(name)
+	col, err := h.svc.GetCollection(collectionName)
 	if err != nil {
 		if errors.Is(err, service.ErrorCollectionNotFound) {
-			return nil, mysql.NewDefaultError(mysql.ER_BAD_TABLE_ERROR, name)
+			return nil, mysql.NewDefaultError(mysql.ER_BAD_TABLE_ERROR, collectionName)
 		}
 		return nil, err
 	}
@@ -336,6 +350,23 @@ func (h *handler) handleSelect(query string) (*mysql.Result, error) {
 	})
 
 	return buildSimpleResult([]string{"document"}, rows)
+}
+
+func parseIdentifierToken(token string) (string, error) {
+	if token == "" {
+		return "", nil
+	}
+
+	if token[0] == '`' {
+		if len(token) < 2 || token[len(token)-1] != '`' {
+			return "", fmt.Errorf("unterminated identifier")
+		}
+		inner := token[1 : len(token)-1]
+		inner = strings.ReplaceAll(inner, "``", "`")
+		return inner, nil
+	}
+
+	return token, nil
 }
 
 func (h *handler) handleShowVariables(query string) (*mysql.Result, error) {

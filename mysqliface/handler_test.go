@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-mysql-org/go-mysql/mysql"
+
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/service"
 )
@@ -131,25 +133,55 @@ func TestHandlerInsertAndSelect(t *testing.T) {
 		t.Fatalf("unexpected insert error: %v", err)
 	}
 
-	res, err := h.HandleQuery("SELECT * FROM mycol")
-	if err != nil {
-		t.Fatalf("unexpected select error: %v", err)
-	}
-	if res.Resultset == nil {
-		t.Fatalf("expected resultset")
-	}
-	defer res.Close()
-
-	if len(res.Resultset.RowDatas) != 1 {
-		t.Fatalf("expected 1 row, got %d", len(res.Resultset.RowDatas))
+	queries := []string{
+		"SELECT * FROM mycol",
+		"SELECT * FROM inceptiondb.mycol",
+		"SELECT * FROM `inceptiondb`.`mycol`",
+		"SELECT * FROM `mycol`",
 	}
 
-	values, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
-	if err != nil {
-		t.Fatalf("parse row: %v", err)
+	for _, query := range queries {
+		res, err := h.HandleQuery(query)
+		if err != nil {
+			t.Fatalf("%s: unexpected select error: %v", query, err)
+		}
+		if res.Resultset == nil {
+			t.Fatalf("%s: expected resultset", query)
+		}
+
+		if len(res.Resultset.RowDatas) != 1 {
+			t.Fatalf("%s: expected 1 row, got %d", query, len(res.Resultset.RowDatas))
+		}
+
+		values, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+		if err != nil {
+			t.Fatalf("%s: parse row: %v", query, err)
+		}
+		if string(values[0].AsString()) == "" {
+			t.Fatalf("%s: expected payload, got empty string", query)
+		}
+
+		res.Close()
 	}
-	if string(values[0].AsString()) == "" {
-		t.Fatalf("expected payload, got empty string")
+}
+
+func TestHandlerSelectWithUnknownSchema(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	_, err := h.HandleQuery("SELECT * FROM otherdb.mycol")
+	if err == nil {
+		t.Fatalf("expected error for unknown schema")
+	}
+
+	mysqlErr, ok := err.(*mysql.MyError)
+	if !ok {
+		t.Fatalf("expected MyError, got %T", err)
+	}
+	if mysqlErr.Code != mysql.ER_BAD_DB_ERROR {
+		t.Fatalf("expected bad db error, got code %d", mysqlErr.Code)
 	}
 }
 

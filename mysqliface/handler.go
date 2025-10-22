@@ -281,15 +281,58 @@ func buildSimpleResult(names []string, values [][]interface{}) (*mysql.Result, e
 
 func normalizeQuery(query string) string {
 	q := strings.TrimSpace(query)
-	if strings.HasSuffix(q, ";") {
-		q = strings.TrimSpace(q[:len(q)-1])
-	}
-	if strings.HasPrefix(q, "/*!") && strings.HasSuffix(q, "*/") {
-		q = strings.TrimSpace(q[3 : len(q)-2])
-		idx := strings.Index(q, " ")
-		if idx >= 0 {
-			q = q[idx+1:]
+	q = trimTrailingSemicolon(q)
+
+	for {
+		switch {
+		case strings.HasPrefix(q, "/*"):
+			if strings.HasPrefix(q, "/*!") {
+				end := strings.Index(q, "*/")
+				if end == -1 {
+					return strings.TrimSpace(q)
+				}
+				inner := strings.TrimSpace(q[3:end])
+				if idx := strings.IndexFunc(inner, func(r rune) bool {
+					return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+				}); idx >= 0 {
+					q = strings.TrimSpace(inner[idx+1:])
+				} else {
+					q = ""
+				}
+			} else {
+				end := strings.Index(q, "*/")
+				if end == -1 {
+					return ""
+				}
+				q = strings.TrimSpace(q[end+2:])
+			}
+		case strings.HasPrefix(q, "--"):
+			newline := strings.IndexAny(q, "\r\n")
+			if newline == -1 {
+				return ""
+			}
+			q = strings.TrimSpace(q[newline+1:])
+		case strings.HasPrefix(q, "#"):
+			newline := strings.IndexAny(q, "\r\n")
+			if newline == -1 {
+				return ""
+			}
+			q = strings.TrimSpace(q[newline+1:])
+		default:
+			return trimTrailingSemicolon(q)
 		}
+
+		if q == "" {
+			return ""
+		}
+
+		q = trimTrailingSemicolon(q)
+	}
+}
+
+func trimTrailingSemicolon(q string) string {
+	for strings.HasSuffix(q, ";") {
+		q = strings.TrimSpace(q[:len(q)-1])
 	}
 	return strings.TrimSpace(q)
 }

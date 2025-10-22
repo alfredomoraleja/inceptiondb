@@ -113,7 +113,11 @@ func (s *Server) handleConn(conn net.Conn) {
 		log.Printf("mysql interface handshake error: %v", err)
 		return
 	}
-	defer mysqlConn.Close()
+	defer func() {
+		if mysqlConn != nil && mysqlConn.Conn != nil {
+			mysqlConn.Close()
+		}
+	}()
 
 	for {
 		if err := mysqlConn.HandleCommand(); err != nil {

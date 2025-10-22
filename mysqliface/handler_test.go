@@ -83,6 +83,18 @@ func TestNormalizeQuery(t *testing.T) {
 	}, {
 		input:    "  SHOW   COLLECTIONS  ",
 		expected: "SHOW   COLLECTIONS",
+	}, {
+		input:    "/* mysql-connector-j */SHOW VARIABLES",
+		expected: "SHOW VARIABLES",
+	}, {
+		input:    "-- comment\nSELECT 1",
+		expected: "SELECT 1",
+	}, {
+		input:    "# comment\r\n/*!40101 SET NAMES utf8 */;",
+		expected: "SET NAMES utf8",
+	}, {
+		input:    "/*only comment*/",
+		expected: "",
 	}}
 
 	for _, tc := range cases {

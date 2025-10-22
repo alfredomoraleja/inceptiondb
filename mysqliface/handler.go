@@ -23,11 +23,44 @@ type handler struct {
 const fakeDatabaseName = "inceptiondb"
 
 var (
-	createCollectionRegexp = regexp.MustCompile(`(?i)^CREATE\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
-	dropCollectionRegexp   = regexp.MustCompile(`(?i)^DROP\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
-	insertRegexp           = regexp.MustCompile(`(?i)^INSERT\s+INTO\s+([a-zA-Z0-9_\-]+)(?:\s*\(\s*document\s*\))?\s+VALUES\s*(.+)$`)
-	selectRegexp           = regexp.MustCompile(`(?i)^SELECT\s+\*\s+FROM\s+([a-zA-Z0-9_\-]+)(?:\s+LIMIT\s+(\d+))?(?:\s+OFFSET\s+(\d+))?$`)
+	createCollectionRegexp              = regexp.MustCompile(`(?i)^CREATE\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
+	dropCollectionRegexp                = regexp.MustCompile(`(?i)^DROP\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
+	insertRegexp                        = regexp.MustCompile(`(?i)^INSERT\s+INTO\s+([a-zA-Z0-9_\-]+)(?:\s*\(\s*document\s*\))?\s+VALUES\s*(.+)$`)
+	selectRegexp                        = regexp.MustCompile(`(?i)^SELECT\s+\*\s+FROM\s+([a-zA-Z0-9_\-]+)(?:\s+LIMIT\s+(\d+))?(?:\s+OFFSET\s+(\d+))?$`)
+	informationSchemaTablesSelectRegexp = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+FROM\s+information_schema\.tables\b(.*)$`)
+	quotedStringRegexp                  = regexp.MustCompile(`'([^']*)'`)
+	limitRegexp                         = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)`)
+	offsetRegexp                        = regexp.MustCompile(`(?i)\bOFFSET\s+(\d+)`)
 )
+
+var informationSchemaTablesAllColumns = []string{
+	"TABLE_CATALOG",
+	"TABLE_SCHEMA",
+	"TABLE_NAME",
+	"TABLE_TYPE",
+	"ENGINE",
+	"VERSION",
+	"ROW_FORMAT",
+	"TABLE_ROWS",
+	"AVG_ROW_LENGTH",
+	"DATA_LENGTH",
+	"MAX_DATA_LENGTH",
+	"INDEX_LENGTH",
+	"DATA_FREE",
+	"AUTO_INCREMENT",
+	"CREATE_TIME",
+	"UPDATE_TIME",
+	"CHECK_TIME",
+	"TABLE_COLLATION",
+	"CHECKSUM",
+	"CREATE_OPTIONS",
+	"TABLE_COMMENT",
+}
+
+type informationSchemaColumn struct {
+	name string
+	key  string
+}
 
 func NewHandler(s service.Servicer, version string) *handler {
 	return &handler{svc: s, version: version}
@@ -62,6 +95,8 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 		return buildSimpleResult([]string{"value"}, [][]interface{}{{0}})
 	case upper == "SELECT 1":
 		return buildSimpleResult([]string{"1"}, [][]interface{}{{1}})
+	case informationSchemaTablesSelectRegexp.MatchString(q):
+		return h.handleInformationSchemaTablesSelect(q)
 	case strings.HasPrefix(upper, "SELECT"):
 		return h.handleSelect(q)
 	case strings.HasPrefix(upper, "SET "):
@@ -209,6 +244,56 @@ func (h *handler) handleInsert(query string) (*mysql.Result, error) {
 	return &mysql.Result{AffectedRows: affected}, nil
 }
 
+func (h *handler) handleInformationSchemaTablesSelect(query string) (*mysql.Result, error) {
+	matches := informationSchemaTablesSelectRegexp.FindStringSubmatch(query)
+	if len(matches) != 3 {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid information_schema query")
+	}
+
+	columnsPart := strings.TrimSpace(matches[1])
+	rest := matches[2]
+
+	columns := parseInformationSchemaTablesColumns(columnsPart)
+	include := shouldIncludeFakeDatabase(rest)
+	limit, offset := parseLimitOffset(rest)
+
+	values := [][]interface{}{}
+	if include {
+		collections := h.svc.ListCollections()
+		names := make([]string, 0, len(collections))
+		for name := range collections {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+
+		if offset >= len(names) {
+			names = nil
+		} else {
+			names = names[offset:]
+		}
+
+		if limit >= 0 && limit < len(names) {
+			names = names[:limit]
+		}
+
+		for _, name := range names {
+			rowInfo := informationSchemaTableRow(name)
+			row := make([]interface{}, len(columns))
+			for i, col := range columns {
+				row[i] = rowInfo[col.key]
+			}
+			values = append(values, row)
+		}
+	}
+
+	fieldNames := make([]string, len(columns))
+	for i, col := range columns {
+		fieldNames[i] = col.name
+	}
+
+	return buildSimpleResult(fieldNames, values)
+}
+
 func (h *handler) handleSelect(query string) (*mysql.Result, error) {
 	matches := selectRegexp.FindStringSubmatch(query)
 	if len(matches) != 4 {
@@ -262,6 +347,119 @@ func (h *handler) handleShowVariables(query string) (*mysql.Result, error) {
 		return buildSimpleResult([]string{"Variable_name", "Value"}, [][]interface{}{{"autocommit", "ON"}})
 	}
 	return buildSimpleResult([]string{"Variable_name", "Value"}, nil)
+}
+
+func parseInformationSchemaTablesColumns(columns string) []informationSchemaColumn {
+	trimmed := strings.TrimSpace(columns)
+	if trimmed == "*" {
+		result := make([]informationSchemaColumn, len(informationSchemaTablesAllColumns))
+		for i, name := range informationSchemaTablesAllColumns {
+			result[i] = informationSchemaColumn{name: name, key: name}
+		}
+		return result
+	}
+
+	parts := strings.Split(trimmed, ",")
+	result := make([]informationSchemaColumn, 0, len(parts))
+	for _, part := range parts {
+		piece := strings.TrimSpace(part)
+		if piece == "" {
+			continue
+		}
+
+		upper := strings.ToUpper(piece)
+		if idx := strings.Index(upper, " AS "); idx >= 0 {
+			alias := strings.TrimSpace(piece[idx+4:])
+			base := strings.TrimSpace(piece[:idx])
+			result = append(result, informationSchemaColumn{name: alias, key: normalizeInformationSchemaColumn(base)})
+			continue
+		}
+
+		result = append(result, informationSchemaColumn{name: piece, key: normalizeInformationSchemaColumn(piece)})
+	}
+
+	return result
+}
+
+func normalizeInformationSchemaColumn(col string) string {
+	col = strings.TrimSpace(col)
+	col = strings.Trim(col, "`\"")
+	if idx := strings.LastIndex(col, "."); idx >= 0 {
+		col = col[idx+1:]
+	}
+	return strings.ToUpper(col)
+}
+
+func shouldIncludeFakeDatabase(rest string) bool {
+	upper := strings.ToUpper(rest)
+	if !strings.Contains(upper, "TABLE_SCHEMA") {
+		return true
+	}
+
+	if strings.Contains(upper, "DATABASE()") {
+		return true
+	}
+
+	matches := quotedStringRegexp.FindAllStringSubmatch(rest, -1)
+	if len(matches) == 0 {
+		if strings.Contains(upper, strings.ToUpper(fakeDatabaseName)) {
+			return true
+		}
+		return false
+	}
+
+	fakeUpper := strings.ToUpper(fakeDatabaseName)
+	for _, match := range matches {
+		if strings.ToUpper(match[1]) == fakeUpper {
+			return true
+		}
+	}
+
+	return false
+}
+
+func parseLimitOffset(rest string) (limit int, offset int) {
+	limit = -1
+	offset = 0
+
+	if m := limitRegexp.FindStringSubmatch(rest); len(m) == 2 {
+		if v, err := strconv.Atoi(m[1]); err == nil {
+			limit = v
+		}
+	}
+	if m := offsetRegexp.FindStringSubmatch(rest); len(m) == 2 {
+		if v, err := strconv.Atoi(m[1]); err == nil {
+			offset = v
+		}
+	}
+
+	return
+}
+
+func informationSchemaTableRow(name string) map[string]interface{} {
+	return map[string]interface{}{
+		"TABLE_CATALOG":   "def",
+		"TABLE_SCHEMA":    fakeDatabaseName,
+		"TABLE_NAME":      name,
+		"TABLE_TYPE":      "BASE TABLE",
+		"ENGINE":          "InnoDB",
+		"VERSION":         nil,
+		"ROW_FORMAT":      nil,
+		"TABLE_ROWS":      nil,
+		"AVG_ROW_LENGTH":  nil,
+		"DATA_LENGTH":     nil,
+		"MAX_DATA_LENGTH": nil,
+		"INDEX_LENGTH":    nil,
+		"DATA_FREE":       nil,
+		"AUTO_INCREMENT":  nil,
+		"CREATE_TIME":     nil,
+		"UPDATE_TIME":     nil,
+		"CHECK_TIME":      nil,
+		"TABLE_COLLATION": "utf8mb4_general_ci",
+		"CHECKSUM":        nil,
+		"CREATE_OPTIONS":  "",
+		"TABLE_COMMENT":   "",
+	}
 }
 
 func (h *handler) ensureCollection(name string) (*collection.Collection, error) {

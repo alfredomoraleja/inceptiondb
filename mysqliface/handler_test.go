@@ -2,6 +2,7 @@ package mysqliface
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/fulldump/inceptiondb/collection"
@@ -227,6 +228,79 @@ func TestShowTablesUsesFakeDatabaseName(t *testing.T) {
 
 	if got := string(res.Resultset.Fields[0].Name); got != "Tables_in_"+fakeDatabaseName {
 		t.Fatalf("expected column name 'Tables_in_%s', got %q", fakeDatabaseName, got)
+	}
+}
+
+func TestSelectInformationSchemaTablesBySchema(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	if _, err := svc.CreateCollection("alpha"); err != nil {
+		t.Fatalf("createCollection alpha: %v", err)
+	}
+	if _, err := svc.CreateCollection("beta"); err != nil {
+		t.Fatalf("createCollection beta: %v", err)
+	}
+
+	h := NewHandler(svc, "v-test")
+	query := "SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = 'inceptiondb' ORDER BY TABLE_NAME"
+	res, err := h.HandleQuery(query)
+	if err != nil {
+		t.Fatalf("information_schema select: %v", err)
+	}
+	defer res.Close()
+
+	if got := len(res.Resultset.RowDatas); got != 2 {
+		t.Fatalf("expected 2 rows, got %d", got)
+	}
+
+	if got := string(res.Resultset.Fields[0].Name); strings.ToUpper(got) != "TABLE_NAME" {
+		t.Fatalf("expected TABLE_NAME column, got %q", got)
+	}
+
+	first, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse first row: %v", err)
+	}
+	second, err := res.Resultset.RowDatas[1].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse second row: %v", err)
+	}
+
+	if string(first[0].AsString()) != "alpha" || string(second[0].AsString()) != "beta" {
+		t.Fatalf("expected ordered names alpha, beta got %q, %q", first[0].AsString(), second[0].AsString())
+	}
+}
+
+func TestSelectInformationSchemaTablesStar(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	if _, err := svc.CreateCollection("alpha"); err != nil {
+		t.Fatalf("createCollection alpha: %v", err)
+	}
+
+	h := NewHandler(svc, "v-test")
+	res, err := h.HandleQuery("SELECT * FROM information_schema.tables LIMIT 1")
+	if err != nil {
+		t.Fatalf("information_schema select *: %v", err)
+	}
+	defer res.Close()
+
+	if got := len(res.Resultset.Fields); got != len(informationSchemaTablesAllColumns) {
+		t.Fatalf("expected %d columns, got %d", len(informationSchemaTablesAllColumns), got)
+	}
+
+	firstRow, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse row: %v", err)
+	}
+
+	if string(firstRow[2].AsString()) != "alpha" {
+		t.Fatalf("expected TABLE_NAME alpha, got %q", firstRow[2].AsString())
+	}
+	if string(firstRow[3].AsString()) != "BASE TABLE" {
+		t.Fatalf("expected TABLE_TYPE BASE TABLE, got %q", firstRow[3].AsString())
 	}
 }
 

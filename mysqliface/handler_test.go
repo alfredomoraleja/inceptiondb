@@ -174,6 +174,10 @@ func TestShowCollections(t *testing.T) {
 		t.Fatalf("expected 2 rows, got %d", len(res.Resultset.RowDatas))
 	}
 
+	if got := string(res.Resultset.Fields[0].Name); got != "Collection" {
+		t.Fatalf("expected column name 'Collection', got %q", got)
+	}
+
 	row1, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
 	if err != nil {
 		t.Fatalf("parse row: %v", err)
@@ -183,6 +187,46 @@ func TestShowCollections(t *testing.T) {
 	}
 	if string(row1[0].AsString()) == "" {
 		t.Fatalf("expected collection name, got empty string")
+	}
+}
+
+func TestShowDatabases(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+	res, err := h.HandleQuery("SHOW DATABASES")
+	if err != nil {
+		t.Fatalf("show databases error: %v", err)
+	}
+	defer res.Close()
+
+	if len(res.Resultset.RowDatas) != 1 {
+		t.Fatalf("expected 1 database, got %d", len(res.Resultset.RowDatas))
+	}
+
+	row, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse row: %v", err)
+	}
+	if string(row[0].AsString()) != fakeDatabaseName {
+		t.Fatalf("expected fake database %q, got %q", fakeDatabaseName, string(row[0].AsString()))
+	}
+}
+
+func TestShowTablesUsesFakeDatabaseName(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+	res, err := h.HandleQuery("SHOW TABLES")
+	if err != nil {
+		t.Fatalf("show tables error: %v", err)
+	}
+	defer res.Close()
+
+	if got := string(res.Resultset.Fields[0].Name); got != "Tables_in_"+fakeDatabaseName {
+		t.Fatalf("expected column name 'Tables_in_%s', got %q", fakeDatabaseName, got)
 	}
 }
 

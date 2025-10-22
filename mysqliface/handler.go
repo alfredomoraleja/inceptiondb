@@ -20,6 +20,8 @@ type handler struct {
 	version string
 }
 
+const fakeDatabaseName = "inceptiondb"
+
 var (
 	createCollectionRegexp = regexp.MustCompile(`(?i)^CREATE\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
 	dropCollectionRegexp   = regexp.MustCompile(`(?i)^DROP\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
@@ -45,7 +47,9 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 
 	switch {
 	case strings.HasPrefix(upper, "SHOW COLLECTIONS") || strings.HasPrefix(upper, "SHOW TABLES"):
-		return h.handleShowCollections()
+		return h.handleShowCollections(q)
+	case strings.HasPrefix(upper, "SHOW DATABASES") || strings.HasPrefix(upper, "SHOW SCHEMAS"):
+		return h.handleShowDatabases()
 	case strings.HasPrefix(upper, "CREATE COLLECTION"):
 		return h.handleCreateCollection(q)
 	case strings.HasPrefix(upper, "DROP COLLECTION"):
@@ -105,7 +109,7 @@ func (h *handler) HandleOtherCommand(cmd byte, data []byte) error {
 	return mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, fmt.Sprintf("command %d", cmd))
 }
 
-func (h *handler) handleShowCollections() (*mysql.Result, error) {
+func (h *handler) handleShowCollections(query string) (*mysql.Result, error) {
 	collections := h.svc.ListCollections()
 	names := make([]string, 0, len(collections))
 	for name := range collections {
@@ -118,7 +122,17 @@ func (h *handler) handleShowCollections() (*mysql.Result, error) {
 		values = append(values, []interface{}{name})
 	}
 
-	return buildSimpleResult([]string{"Collection"}, values)
+	columnName := "Collection"
+	upper := strings.ToUpper(query)
+	if strings.HasPrefix(upper, "SHOW TABLES") {
+		columnName = fmt.Sprintf("Tables_in_%s", fakeDatabaseName)
+	}
+
+	return buildSimpleResult([]string{columnName}, values)
+}
+
+func (h *handler) handleShowDatabases() (*mysql.Result, error) {
+	return buildSimpleResult([]string{"Database"}, [][]interface{}{{fakeDatabaseName}})
 }
 
 func (h *handler) handleCreateCollection(query string) (*mysql.Result, error) {

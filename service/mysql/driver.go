@@ -114,8 +114,32 @@ func (r *rows) Next(dest []driver.Value) error {
 func executeQuery(srv service.Servicer, query string) (driver.Rows, error) {
 	upper := strings.ToUpper(query)
 	switch {
+	case upper == "SHOW DATABASES" || upper == "SHOW DATABASES;":
+		return showDatabases("")
+	case strings.HasPrefix(upper, "SHOW DATABASES LIKE "):
+		pattern := strings.TrimSpace(query[len("SHOW DATABASES LIKE "):])
+		pattern = strings.TrimSuffix(pattern, ";")
+		pattern = strings.Trim(pattern, " `\"'")
+		return showDatabases(pattern)
+	case upper == "SHOW SCHEMAS" || upper == "SHOW SCHEMAS;":
+		return showDatabases("")
+	case strings.HasPrefix(upper, "SHOW SCHEMAS LIKE "):
+		pattern := strings.TrimSpace(query[len("SHOW SCHEMAS LIKE "):])
+		pattern = strings.TrimSuffix(pattern, ";")
+		pattern = strings.Trim(pattern, " `\"'")
+		return showDatabases(pattern)
 	case upper == "SHOW TABLES" || upper == "SHOW TABLES;":
-		return showTables(srv)
+		return showTables(srv, "", false)
+	case strings.HasPrefix(upper, "SHOW TABLES FROM "):
+		database := strings.TrimSpace(query[len("SHOW TABLES FROM "):])
+		database = strings.TrimSuffix(database, ";")
+		database = trimIdentifier(database)
+		return showTables(srv, database, false)
+	case strings.HasPrefix(upper, "SHOW FULL TABLES FROM "):
+		database := strings.TrimSpace(query[len("SHOW FULL TABLES FROM "):])
+		database = strings.TrimSuffix(database, ";")
+		database = trimIdentifier(database)
+		return showTables(srv, database, true)
 	case strings.HasPrefix(upper, "SHOW COLUMNS FROM "):
 		table := strings.TrimSpace(query[len("SHOW COLUMNS FROM "):])
 		table = strings.TrimSuffix(table, ";")
@@ -133,7 +157,20 @@ func executeQuery(srv service.Servicer, query string) (driver.Rows, error) {
 	}
 }
 
-func showTables(srv service.Servicer) (driver.Rows, error) {
+const fakeDatabaseName = "inceptiondb"
+
+func showDatabases(pattern string) (driver.Rows, error) {
+	columns := []string{"Database"}
+
+	if pattern != "" && !likeMatch(pattern, fakeDatabaseName) {
+		return &rows{columns: columns, data: [][]driver.Value{}}, nil
+	}
+
+	data := [][]driver.Value{{fakeDatabaseName}}
+	return &rows{columns: columns, data: data}, nil
+}
+
+func showTables(srv service.Servicer, database string, includeType bool) (driver.Rows, error) {
 	collections := srv.ListCollections()
 	names := make([]string, 0, len(collections))
 	for name := range collections {
@@ -141,12 +178,26 @@ func showTables(srv service.Servicer) (driver.Rows, error) {
 	}
 	sort.Strings(names)
 
-	data := make([][]driver.Value, len(names))
-	for i, name := range names {
-		data[i] = []driver.Value{name}
+	columnName := "table_name"
+	if database != "" {
+		columnName = fmt.Sprintf("Tables_in_%s", database)
 	}
 
-	return &rows{columns: []string{"table_name"}, data: data}, nil
+	columns := []string{columnName}
+	if includeType {
+		columns = append(columns, "Table_type")
+	}
+
+	data := make([][]driver.Value, len(names))
+	for i, name := range names {
+		row := []driver.Value{name}
+		if includeType {
+			row = append(row, "BASE TABLE")
+		}
+		data[i] = row
+	}
+
+	return &rows{columns: columns, data: data}, nil
 }
 
 func describeTable(srv service.Servicer, table string) (driver.Rows, error) {
@@ -240,6 +291,41 @@ func selectQuery(srv service.Servicer, query string) (driver.Rows, error) {
 	}
 
 	return &rows{columns: columns, data: data}, nil
+}
+
+func likeMatch(pattern, value string) bool {
+	prunes := []rune(pattern)
+	vrunes := []rune(value)
+
+	var helper func(pi, vi int) bool
+	helper = func(pi, vi int) bool {
+		for pi < len(prunes) {
+			switch prunes[pi] {
+			case '%':
+				for skip := vi; skip <= len(vrunes); skip++ {
+					if helper(pi+1, skip) {
+						return true
+					}
+				}
+				return false
+			case '_':
+				if vi >= len(vrunes) {
+					return false
+				}
+				pi++
+				vi++
+			default:
+				if vi >= len(vrunes) || prunes[pi] != vrunes[vi] {
+					return false
+				}
+				pi++
+				vi++
+			}
+		}
+		return vi == len(vrunes)
+	}
+
+	return helper(0, 0)
 }
 
 func trimIdentifier(id string) string {

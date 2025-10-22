@@ -201,3 +201,128 @@ func TestMetadataQueries(t *testing.T) {
 		}
 	}
 }
+
+func TestShowDatabases(t *testing.T) {
+	srv := setupTestService(t)
+	driverName := Register("test-databases", srv)
+
+	db, err := sql.Open(driverName, "test-databases")
+	if err != nil {
+		t.Fatalf("open sql connection: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Close()
+	})
+
+	rows, err := db.Query("SHOW DATABASES")
+	if err != nil {
+		t.Fatalf("show databases: %v", err)
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("columns: %v", err)
+	}
+	if len(columns) != 1 || columns[0] != "Database" {
+		t.Fatalf("unexpected columns: %v", columns)
+	}
+
+	if !rows.Next() {
+		t.Fatalf("expected at least one database")
+	}
+	var databaseName string
+	if err := rows.Scan(&databaseName); err != nil {
+		t.Fatalf("scan database: %v", err)
+	}
+	if databaseName != fakeDatabaseName {
+		t.Fatalf("unexpected database name: %s", databaseName)
+	}
+	if rows.Next() {
+		t.Fatalf("unexpected extra database rows")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows err: %v", err)
+	}
+
+	likeRows, err := db.Query("SHOW DATABASES LIKE 'nope%'")
+	if err != nil {
+		t.Fatalf("show databases like: %v", err)
+	}
+	defer likeRows.Close()
+	if likeRows.Next() {
+		t.Fatalf("expected no matches for LIKE pattern")
+	}
+}
+
+func TestShowTablesFromDatabase(t *testing.T) {
+	srv := setupTestService(t)
+	driverName := Register("test-show-tables", srv)
+
+	db, err := sql.Open(driverName, "test-show-tables")
+	if err != nil {
+		t.Fatalf("open sql connection: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Close()
+	})
+
+	rows, err := db.Query("SHOW TABLES FROM `" + fakeDatabaseName + "`")
+	if err != nil {
+		t.Fatalf("show tables from: %v", err)
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatalf("columns: %v", err)
+	}
+	expectedColumn := "Tables_in_" + fakeDatabaseName
+	if len(columns) != 1 || columns[0] != expectedColumn {
+		t.Fatalf("unexpected columns: %v", columns)
+	}
+
+	if !rows.Next() {
+		t.Fatalf("expected at least one table")
+	}
+	var tableName string
+	if err := rows.Scan(&tableName); err != nil {
+		t.Fatalf("scan table: %v", err)
+	}
+	if tableName != "people" {
+		t.Fatalf("unexpected table name: %s", tableName)
+	}
+	if rows.Next() {
+		t.Fatalf("unexpected extra table rows")
+	}
+
+	fullRows, err := db.Query("SHOW FULL TABLES FROM `" + fakeDatabaseName + "`")
+	if err != nil {
+		t.Fatalf("show full tables from: %v", err)
+	}
+	defer fullRows.Close()
+
+	fullColumns, err := fullRows.Columns()
+	if err != nil {
+		t.Fatalf("full columns: %v", err)
+	}
+	if len(fullColumns) != 2 || fullColumns[0] != expectedColumn || fullColumns[1] != "Table_type" {
+		t.Fatalf("unexpected full columns: %v", fullColumns)
+	}
+	if !fullRows.Next() {
+		t.Fatalf("expected at least one table in full listing")
+	}
+	var fullTable, tableType string
+	if err := fullRows.Scan(&fullTable, &tableType); err != nil {
+		t.Fatalf("scan full table: %v", err)
+	}
+	if fullTable != "people" {
+		t.Fatalf("unexpected full table name: %s", fullTable)
+	}
+	if tableType != "BASE TABLE" {
+		t.Fatalf("unexpected table type: %s", tableType)
+	}
+	if fullRows.Next() {
+		t.Fatalf("unexpected extra full table rows")
+	}
+}

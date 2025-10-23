@@ -107,22 +107,6 @@ func TestNormalizeQuery(t *testing.T) {
 	}
 }
 
-func TestParseInsertValues(t *testing.T) {
-	docs, err := parseInsertValues(`('{"id":"1"}') , ('{"id":"2","name":"Ada"}')`)
-	if err != nil {
-		t.Fatalf("parseInsertValues returned error: %v", err)
-	}
-	if len(docs) != 2 {
-		t.Fatalf("expected 2 documents, got %d", len(docs))
-	}
-	if docs[0]["id"].(string) != "1" {
-		t.Fatalf("unexpected first document: %#v", docs[0])
-	}
-	if docs[1]["name"].(string) != "Ada" {
-		t.Fatalf("unexpected second document: %#v", docs[1])
-	}
-}
-
 func TestHandlerInsertAndSelect(t *testing.T) {
 	svc := newMockService(t)
 	t.Cleanup(svc.Close)

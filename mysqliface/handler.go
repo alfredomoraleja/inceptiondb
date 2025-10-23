@@ -4,85 +4,82 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/go-mysql-org/go-mysql/utils"
+	"github.com/pingcap/tidb/pkg/parser"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+	"github.com/pingcap/tidb/pkg/parser/opcode"
+	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 
 	"github.com/fulldump/inceptiondb/collection"
 	"github.com/fulldump/inceptiondb/service"
 )
 
 type handler struct {
-	svc     service.Servicer
-	version string
+	svc      service.Servicer
+	version  string
+	parser   *parser.Parser
+	parserMu sync.Mutex
 }
 
 const fakeDatabaseName = "inceptiondb"
 
 var (
-	createCollectionRegexp               = regexp.MustCompile(`(?i)^CREATE\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
-	dropCollectionRegexp                 = regexp.MustCompile(`(?i)^DROP\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
-	insertRegexp                         = regexp.MustCompile(`(?i)^INSERT\s+INTO\s+([a-zA-Z0-9_\-]+)(?:\s*\(\s*document\s*\))?\s+VALUES\s*(.+)$`)
-	selectRegexp                         = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s+FROM\\s+(?:(`[^`]+`|[a-zA-Z0-9_\\-]+)\\.)?(`[^`]+`|[a-zA-Z0-9_\\-]+)(?:\\s+LIMIT\\s+(\\d+))?(?:\\s+OFFSET\\s+(\\d+))?$")
-	informationSchemaTablesSelectRegexp  = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+FROM\s+information_schema\.tables\b(.*)$`)
-	informationSchemaColumnsSelectRegexp = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+FROM\s+information_schema\.columns\b(.*)$`)
-	quotedStringRegexp                   = regexp.MustCompile(`'([^']*)'`)
-	tableNameEqualsRegexp                = regexp.MustCompile("(?is)TABLE_NAME\\s*=\\s*(?:'([^']*)'|`([^`]+)`|([a-zA-Z0-9_\\-\\.]+))")
-	limitRegexp                          = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)`)
-	offsetRegexp                         = regexp.MustCompile(`(?i)\bOFFSET\s+(\d+)`)
+	informationSchemaTablesAllColumns = []string{
+		"TABLE_CATALOG",
+		"TABLE_SCHEMA",
+		"TABLE_NAME",
+		"TABLE_TYPE",
+		"ENGINE",
+		"VERSION",
+		"ROW_FORMAT",
+		"TABLE_ROWS",
+		"AVG_ROW_LENGTH",
+		"DATA_LENGTH",
+		"MAX_DATA_LENGTH",
+		"INDEX_LENGTH",
+		"DATA_FREE",
+		"AUTO_INCREMENT",
+		"CREATE_TIME",
+		"UPDATE_TIME",
+		"CHECK_TIME",
+		"TABLE_COLLATION",
+		"CHECKSUM",
+		"CREATE_OPTIONS",
+		"TABLE_COMMENT",
+	}
+
+	informationSchemaColumnsAllColumns = []string{
+		"TABLE_CATALOG",
+		"TABLE_SCHEMA",
+		"TABLE_NAME",
+		"COLUMN_NAME",
+		"ORDINAL_POSITION",
+		"COLUMN_DEFAULT",
+		"IS_NULLABLE",
+		"DATA_TYPE",
+		"CHARACTER_MAXIMUM_LENGTH",
+		"CHARACTER_OCTET_LENGTH",
+		"NUMERIC_PRECISION",
+		"NUMERIC_SCALE",
+		"DATETIME_PRECISION",
+		"CHARACTER_SET_NAME",
+		"COLLATION_NAME",
+		"COLUMN_TYPE",
+		"COLUMN_KEY",
+		"EXTRA",
+		"PRIVILEGES",
+		"COLUMN_COMMENT",
+		"GENERATION_EXPRESSION",
+		"SRS_ID",
+	}
 )
-
-var informationSchemaTablesAllColumns = []string{
-	"TABLE_CATALOG",
-	"TABLE_SCHEMA",
-	"TABLE_NAME",
-	"TABLE_TYPE",
-	"ENGINE",
-	"VERSION",
-	"ROW_FORMAT",
-	"TABLE_ROWS",
-	"AVG_ROW_LENGTH",
-	"DATA_LENGTH",
-	"MAX_DATA_LENGTH",
-	"INDEX_LENGTH",
-	"DATA_FREE",
-	"AUTO_INCREMENT",
-	"CREATE_TIME",
-	"UPDATE_TIME",
-	"CHECK_TIME",
-	"TABLE_COLLATION",
-	"CHECKSUM",
-	"CREATE_OPTIONS",
-	"TABLE_COMMENT",
-}
-
-var informationSchemaColumnsAllColumns = []string{
-	"TABLE_CATALOG",
-	"TABLE_SCHEMA",
-	"TABLE_NAME",
-	"COLUMN_NAME",
-	"ORDINAL_POSITION",
-	"COLUMN_DEFAULT",
-	"IS_NULLABLE",
-	"DATA_TYPE",
-	"CHARACTER_MAXIMUM_LENGTH",
-	"CHARACTER_OCTET_LENGTH",
-	"NUMERIC_PRECISION",
-	"NUMERIC_SCALE",
-	"DATETIME_PRECISION",
-	"CHARACTER_SET_NAME",
-	"COLLATION_NAME",
-	"COLUMN_TYPE",
-	"COLUMN_KEY",
-	"EXTRA",
-	"PRIVILEGES",
-	"COLUMN_COMMENT",
-	"GENERATION_EXPRESSION",
-	"SRS_ID",
-}
 
 type informationSchemaColumn struct {
 	name string
@@ -90,7 +87,7 @@ type informationSchemaColumn struct {
 }
 
 func NewHandler(s service.Servicer, version string) *handler {
-	return &handler{svc: s, version: version}
+	return &handler{svc: s, version: version, parser: parser.New()}
 }
 
 func (h *handler) UseDB(dbName string) error {
@@ -99,49 +96,58 @@ func (h *handler) UseDB(dbName string) error {
 
 func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 	q := normalizeQuery(query)
-	fmt.Println("QUERY:", q)
 	if q == "" {
 		return &mysql.Result{}, nil
 	}
 
 	upper := strings.ToUpper(q)
+	tokens := strings.Fields(upper)
+	if len(tokens) == 0 {
+		return &mysql.Result{}, nil
+	}
 
 	switch {
-	case strings.HasPrefix(upper, "SHOW COLLECTIONS") || strings.HasPrefix(upper, "SHOW TABLES"):
+	case len(tokens) >= 2 && tokens[0] == "SHOW" && (tokens[1] == "COLLECTIONS" || tokens[1] == "TABLES"):
 		return h.handleShowCollections(q)
-	case strings.HasPrefix(upper, "SHOW DATABASES") || strings.HasPrefix(upper, "SHOW SCHEMAS"):
+	case len(tokens) >= 2 && tokens[0] == "SHOW" && (tokens[1] == "DATABASES" || tokens[1] == "SCHEMAS"):
 		return h.handleShowDatabases()
-	case strings.HasPrefix(upper, "CREATE COLLECTION"):
-		return h.handleCreateCollection(q)
-	case strings.HasPrefix(upper, "DROP COLLECTION"):
-		return h.handleDropCollection(q)
-	case strings.HasPrefix(upper, "INSERT INTO"):
-		return h.handleInsert(q)
-	case strings.HasPrefix(upper, "SELECT VERSION()"):
-		return buildSimpleResult([]string{"version()"}, [][]interface{}{{h.version}})
-	case strings.HasPrefix(upper, "SELECT @@"):
-		return buildSimpleResult([]string{"value"}, [][]interface{}{{0}})
-	case upper == "SELECT 1":
-		return buildSimpleResult([]string{"1"}, [][]interface{}{{1}})
-	case informationSchemaTablesSelectRegexp.MatchString(q):
-		return h.handleInformationSchemaTablesSelect(q)
-	case informationSchemaColumnsSelectRegexp.MatchString(q):
-		return h.handleInformationSchemaColumnsSelect(q)
-	case strings.HasPrefix(upper, "SELECT"):
-		return h.handleSelect(q)
-	case strings.HasPrefix(upper, "SET "):
+	case len(tokens) >= 2 && tokens[0] == "CREATE" && (tokens[1] == "COLLECTION" || tokens[1] == "TABLE"):
+		stmt, err := h.parseCreateCollectionStmt(q)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		return h.handleCreateCollection(stmt)
+	case len(tokens) >= 2 && tokens[0] == "DROP" && (tokens[1] == "COLLECTION" || tokens[1] == "TABLE"):
+		stmt, err := h.parseDropCollectionStmt(q)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		return h.handleDropCollection(stmt)
+	case tokens[0] == "INSERT":
+		stmt, err := h.parseInsertStmt(q)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		return h.handleInsert(stmt)
+	case tokens[0] == "SELECT":
+		stmt, err := h.parseSelectStmt(q)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		return h.handleSelectStmt(stmt)
+	case tokens[0] == "SET":
 		return &mysql.Result{}, nil
-	case strings.HasPrefix(upper, "SHOW VARIABLES"):
+	case len(tokens) >= 2 && tokens[0] == "SHOW" && tokens[1] == "VARIABLES":
 		return h.handleShowVariables(q)
-	case strings.HasPrefix(upper, "SHOW WARNINGS"):
+	case len(tokens) >= 2 && tokens[0] == "SHOW" && tokens[1] == "WARNINGS":
 		return buildSimpleResult([]string{"Level", "Code", "Message"}, nil)
-	case strings.HasPrefix(upper, "SHOW STATUS"):
+	case len(tokens) >= 2 && tokens[0] == "SHOW" && tokens[1] == "STATUS":
 		return buildSimpleResult([]string{"Variable_name", "Value"}, nil)
-	case strings.HasPrefix(upper, "SHOW CHARACTER SET") || strings.HasPrefix(upper, "SHOW COLLATION"):
+	case len(tokens) >= 3 && tokens[0] == "SHOW" && ((tokens[1] == "CHARACTER" && tokens[2] == "SET") || tokens[1] == "COLLATION"):
 		return buildSimpleResult([]string{"Charset", "Description", "Default collation", "Maxlen"}, nil)
-	case strings.HasPrefix(upper, "DESCRIBE ") || strings.HasPrefix(upper, "EXPLAIN "):
+	case tokens[0] == "DESCRIBE" || tokens[0] == "EXPLAIN":
 		return buildSimpleResult([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}, nil)
-	case strings.HasPrefix(upper, "USE "):
+	case tokens[0] == "USE":
 		return &mysql.Result{}, nil
 	case upper == "BEGIN" || upper == "START TRANSACTION" || strings.HasPrefix(upper, "BEGIN "):
 		return &mysql.Result{}, nil
@@ -152,6 +158,73 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 	default:
 		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, fmt.Sprintf("query '%s'", q))
 	}
+}
+
+func (h *handler) parseCreateCollectionStmt(query string) (*ast.CreateTableStmt, error) {
+	rewritten := replaceFirstKeyword(query, "COLLECTION", "TABLE")
+	stmt, err := h.parseStatement(rewritten)
+	if err != nil {
+		return nil, err
+	}
+	createStmt, ok := stmt.(*ast.CreateTableStmt)
+	if !ok {
+		return nil, fmt.Errorf("not a create table statement")
+	}
+	return createStmt, nil
+}
+
+func (h *handler) parseDropCollectionStmt(query string) (*ast.DropTableStmt, error) {
+	rewritten := replaceFirstKeyword(query, "COLLECTION", "TABLE")
+	stmt, err := h.parseStatement(rewritten)
+	if err != nil {
+		return nil, err
+	}
+	dropStmt, ok := stmt.(*ast.DropTableStmt)
+	if !ok {
+		return nil, fmt.Errorf("not a drop table statement")
+	}
+	return dropStmt, nil
+}
+
+func (h *handler) parseInsertStmt(query string) (*ast.InsertStmt, error) {
+	stmt, err := h.parseStatement(query)
+	if err != nil {
+		return nil, err
+	}
+	insertStmt, ok := stmt.(*ast.InsertStmt)
+	if !ok {
+		return nil, fmt.Errorf("not an insert statement")
+	}
+	return insertStmt, nil
+}
+
+func (h *handler) parseSelectStmt(query string) (*ast.SelectStmt, error) {
+	stmt, err := h.parseStatement(query)
+	if err != nil {
+		return nil, err
+	}
+	selectStmt, ok := stmt.(*ast.SelectStmt)
+	if !ok {
+		return nil, fmt.Errorf("not a select statement")
+	}
+	return selectStmt, nil
+}
+
+func (h *handler) parseStatement(query string) (ast.StmtNode, error) {
+	h.parserMu.Lock()
+	defer h.parserMu.Unlock()
+
+	stmts, _, err := h.parser.ParseSQL(query)
+	if err != nil {
+		return nil, err
+	}
+	if len(stmts) == 0 {
+		return nil, fmt.Errorf("empty statement")
+	}
+	if len(stmts) > 1 {
+		return nil, fmt.Errorf("multiple statements not supported")
+	}
+	return stmts[0], nil
 }
 
 func (h *handler) HandleFieldList(table string, fieldWildcard string) ([]*mysql.Field, error) {
@@ -200,13 +273,23 @@ func (h *handler) handleShowDatabases() (*mysql.Result, error) {
 	return buildSimpleResult([]string{"Database"}, [][]interface{}{{fakeDatabaseName}})
 }
 
-func (h *handler) handleCreateCollection(query string) (*mysql.Result, error) {
-	matches := createCollectionRegexp.FindStringSubmatch(query)
-	if len(matches) != 2 {
+func (h *handler) handleCreateCollection(stmt *ast.CreateTableStmt) (*mysql.Result, error) {
+	if stmt.Table == nil {
 		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid create collection statement")
 	}
 
-	name := matches[1]
+	if stmt.Table.Schema.O != "" && !strings.EqualFold(stmt.Table.Schema.O, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, stmt.Table.Schema.O)
+	}
+
+	if stmt.IfNotExists || stmt.ReferTable != nil || stmt.Select != nil || len(stmt.Cols) > 0 || len(stmt.Constraints) > 0 || len(stmt.Options) > 0 || stmt.Partition != nil || stmt.TemporaryKeyword != ast.TemporaryNone {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid create collection statement")
+	}
+
+	name := stmt.Table.Name.O
+	if name == "" {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid create collection statement")
+	}
 
 	col, err := h.svc.CreateCollection(name)
 	if err != nil {
@@ -223,13 +306,21 @@ func (h *handler) handleCreateCollection(query string) (*mysql.Result, error) {
 	return &mysql.Result{AffectedRows: 1}, nil
 }
 
-func (h *handler) handleDropCollection(query string) (*mysql.Result, error) {
-	matches := dropCollectionRegexp.FindStringSubmatch(query)
-	if len(matches) != 2 {
+func (h *handler) handleDropCollection(stmt *ast.DropTableStmt) (*mysql.Result, error) {
+	if stmt.IsView || stmt.IfExists || stmt.TemporaryKeyword != ast.TemporaryNone || len(stmt.Tables) != 1 {
 		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid drop collection statement")
 	}
 
-	name := matches[1]
+	table := stmt.Tables[0]
+	if table.Schema.O != "" && !strings.EqualFold(table.Schema.O, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, table.Schema.O)
+	}
+
+	name := table.Name.O
+	if name == "" {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid drop collection statement")
+	}
+
 	err := h.svc.DeleteCollection(name)
 	if err != nil {
 		if errors.Is(err, service.ErrorCollectionNotFound) {
@@ -241,18 +332,49 @@ func (h *handler) handleDropCollection(query string) (*mysql.Result, error) {
 	return &mysql.Result{AffectedRows: 1}, nil
 }
 
-func (h *handler) handleInsert(query string) (*mysql.Result, error) {
-	matches := insertRegexp.FindStringSubmatch(query)
-	if len(matches) != 3 {
+func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
+	schema, name, err := extractSingleTableName(stmt.Table)
+	if err != nil {
 		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid insert statement")
 	}
 
-	name := matches[1]
-	valuesRaw := matches[2]
+	if schema != "" && !strings.EqualFold(schema, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, schema)
+	}
 
-	docs, err := parseInsertValues(valuesRaw)
-	if err != nil {
-		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+	if stmt.Setlist || stmt.Select != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported insert form")
+	}
+
+	if len(stmt.Lists) == 0 {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid insert statement")
+	}
+
+	if len(stmt.Columns) > 0 {
+		if len(stmt.Columns) != 1 || !strings.EqualFold(stmt.Columns[0].Name.O, "document") {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only document column inserts are supported")
+		}
+	}
+
+	docs := make([]map[string]any, 0, len(stmt.Lists))
+	for _, row := range stmt.Lists {
+		if len(row) != 1 {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only single column inserts are supported")
+		}
+		payload, ok := valueExprToString(row[0])
+		if !ok {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "document must be a string literal")
+		}
+
+		item := map[string]any{}
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		docs = append(docs, item)
+	}
+
+	if len(docs) == 0 {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "empty insert payload")
 	}
 
 	col, err := h.ensureCollection(name)
@@ -274,18 +396,17 @@ func (h *handler) handleInsert(query string) (*mysql.Result, error) {
 	return &mysql.Result{AffectedRows: affected}, nil
 }
 
-func (h *handler) handleInformationSchemaTablesSelect(query string) (*mysql.Result, error) {
-	matches := informationSchemaTablesSelectRegexp.FindStringSubmatch(query)
-	if len(matches) != 3 {
-		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid information_schema query")
+func (h *handler) handleInformationSchemaTablesSelect(stmt *ast.SelectStmt) (*mysql.Result, error) {
+	columns, err := buildInformationSchemaColumns(stmt.Fields, informationSchemaTablesAllColumns)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
 	}
 
-	columnsPart := strings.TrimSpace(matches[1])
-	rest := matches[2]
-
-	columns := parseInformationSchemaColumns(columnsPart, informationSchemaTablesAllColumns)
-	include := shouldIncludeFakeDatabase(rest)
-	limit, offset := parseLimitOffset(rest)
+	include := shouldIncludeFakeDatabase(stmt.Where)
+	limit, offset, err := limitOffsetFromStmt(stmt)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+	}
 
 	values := [][]interface{}{}
 	if include {
@@ -298,7 +419,7 @@ func (h *handler) handleInformationSchemaTablesSelect(query string) (*mysql.Resu
 
 		if offset >= len(names) {
 			names = nil
-		} else {
+		} else if offset > 0 {
 			names = names[offset:]
 		}
 
@@ -324,27 +445,23 @@ func (h *handler) handleInformationSchemaTablesSelect(query string) (*mysql.Resu
 	return buildSimpleResult(fieldNames, values)
 }
 
-func (h *handler) handleInformationSchemaColumnsSelect(query string) (*mysql.Result, error) {
-	matches := informationSchemaColumnsSelectRegexp.FindStringSubmatch(query)
-	if len(matches) != 3 {
-		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid information_schema query")
+func (h *handler) handleInformationSchemaColumnsSelect(stmt *ast.SelectStmt) (*mysql.Result, error) {
+	columns, err := buildInformationSchemaColumns(stmt.Fields, informationSchemaColumnsAllColumns)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
 	}
 
-	columnsPart := strings.TrimSpace(matches[1])
-	rest := matches[2]
-
-	columns := parseInformationSchemaColumns(columnsPart, informationSchemaColumnsAllColumns)
 	fieldNames := make([]string, len(columns))
 	for i, col := range columns {
 		fieldNames[i] = col.name
 	}
 
-	if !shouldIncludeFakeDatabase(rest) {
+	if !shouldIncludeFakeDatabase(stmt.Where) {
 		return buildSimpleResult(fieldNames, nil)
 	}
 
 	collections := h.svc.ListCollections()
-	tableNames := extractTableNameFilters(rest, collections)
+	tableNames := extractTableNameFilters(stmt.Where, collections)
 	if len(tableNames) == 0 {
 		tableNames = make([]string, 0, len(collections))
 		for name := range collections {
@@ -353,7 +470,11 @@ func (h *handler) handleInformationSchemaColumnsSelect(query string) (*mysql.Res
 		sort.Strings(tableNames)
 	}
 
-	limit, offset := parseLimitOffset(rest)
+	limit, offset, err := limitOffsetFromStmt(stmt)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+	}
+
 	if offset >= len(tableNames) {
 		tableNames = nil
 	} else if offset > 0 {
@@ -377,47 +498,86 @@ func (h *handler) handleInformationSchemaColumnsSelect(query string) (*mysql.Res
 	return buildSimpleResult(fieldNames, values)
 }
 
-func (h *handler) handleSelect(query string) (*mysql.Result, error) {
-	matches := selectRegexp.FindStringSubmatch(query)
-	if len(matches) != 5 {
-		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only SELECT * FROM <collection> [LIMIT n] [OFFSET m] is supported")
+func (h *handler) handleSelectStmt(stmt *ast.SelectStmt) (*mysql.Result, error) {
+	if stmt.From == nil {
+		return h.handleSelectWithoutFrom(stmt)
 	}
 
-	schemaToken := matches[1]
-	tableToken := matches[2]
-
-	schemaName, err := parseIdentifierToken(schemaToken)
+	schema, table, err := extractSingleTableName(stmt.From)
 	if err != nil {
-		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid schema identifier")
-	}
-	collectionName, err := parseIdentifierToken(tableToken)
-	if err != nil {
-		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid collection identifier")
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported select target")
 	}
 
-	if schemaName != "" && !strings.EqualFold(schemaName, fakeDatabaseName) {
-		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, schemaName)
-	}
-
-	limit := 0
-	offset := 0
-	if matches[3] != "" {
-		limit, err = strconv.Atoi(matches[3])
-		if err != nil {
-			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid LIMIT value")
-		}
-	}
-	if matches[4] != "" {
-		offset, err = strconv.Atoi(matches[4])
-		if err != nil {
-			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid OFFSET value")
+	if strings.EqualFold(schema, "information_schema") {
+		switch strings.ToLower(table) {
+		case "tables":
+			return h.handleInformationSchemaTablesSelect(stmt)
+		case "columns":
+			return h.handleInformationSchemaColumnsSelect(stmt)
+		default:
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported information_schema table")
 		}
 	}
 
-	col, err := h.svc.GetCollection(collectionName)
+	if schema != "" && !strings.EqualFold(schema, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, schema)
+	}
+
+	return h.handleCollectionSelect(stmt, table)
+}
+
+func (h *handler) handleSelectWithoutFrom(stmt *ast.SelectStmt) (*mysql.Result, error) {
+	if stmt.Fields == nil || len(stmt.Fields.Fields) != 1 {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported select without FROM")
+	}
+
+	field := stmt.Fields.Fields[0]
+	if field.WildCard != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported select without FROM")
+	}
+
+	columnName := field.AsName.O
+	switch expr := field.Expr.(type) {
+	case *ast.FuncCallExpr:
+		if strings.EqualFold(expr.FnName.O, "version") && len(expr.Args) == 0 {
+			if columnName == "" {
+				columnName = "version()"
+			}
+			return buildSimpleResult([]string{columnName}, [][]interface{}{{h.version}})
+		}
+	case *ast.VariableExpr:
+		if columnName == "" {
+			columnName = "value"
+		}
+		return buildSimpleResult([]string{columnName}, [][]interface{}{{0}})
+	case ast.ValueExpr:
+		value := expr.GetValue()
+		if columnName == "" {
+			columnName = fmt.Sprint(value)
+		}
+		return buildSimpleResult([]string{columnName}, [][]interface{}{{value}})
+	}
+
+	return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported select without FROM")
+}
+
+func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*mysql.Result, error) {
+	if stmt.Fields == nil || len(stmt.Fields.Fields) != 1 || stmt.Fields.Fields[0].WildCard == nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only SELECT * is supported")
+	}
+	if stmt.Where != nil || stmt.GroupBy != nil || stmt.Having != nil || stmt.OrderBy != nil || len(stmt.TableHints) > 0 {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported select clause")
+	}
+
+	limit, offset, err := limitOffsetFromStmt(stmt)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+	}
+
+	col, err := h.svc.GetCollection(name)
 	if err != nil {
 		if errors.Is(err, service.ErrorCollectionNotFound) {
-			return nil, mysql.NewDefaultError(mysql.ER_BAD_TABLE_ERROR, collectionName)
+			return nil, mysql.NewDefaultError(mysql.ER_BAD_TABLE_ERROR, name)
 		}
 		return nil, err
 	}
@@ -433,6 +593,249 @@ func (h *handler) handleSelect(query string) (*mysql.Result, error) {
 	})
 
 	return buildSimpleResult([]string{"document"}, rows)
+}
+
+func replaceFirstKeyword(query, keyword, replacement string) string {
+	upper := strings.ToUpper(query)
+	idx := strings.Index(upper, keyword)
+	if idx < 0 {
+		return query
+	}
+	return query[:idx] + replacement + query[idx+len(keyword):]
+}
+
+func extractSingleTableName(clause *ast.TableRefsClause) (string, string, error) {
+	if clause == nil || clause.TableRefs == nil {
+		return "", "", fmt.Errorf("missing table reference")
+	}
+	join := clause.TableRefs
+	if join.Right != nil {
+		return "", "", fmt.Errorf("joins are not supported")
+	}
+	source, ok := join.Left.(*ast.TableSource)
+	if !ok {
+		return "", "", fmt.Errorf("unsupported table source")
+	}
+	table, ok := source.Source.(*ast.TableName)
+	if !ok {
+		return "", "", fmt.Errorf("unsupported table source")
+	}
+	return table.Schema.O, table.Name.O, nil
+}
+
+func buildInformationSchemaColumns(fields *ast.FieldList, allowed []string) ([]informationSchemaColumn, error) {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+
+	if fields == nil || len(fields.Fields) == 0 {
+		return nil, fmt.Errorf("no columns specified")
+	}
+
+	if len(fields.Fields) == 1 && fields.Fields[0].WildCard != nil {
+		result := make([]informationSchemaColumn, len(allowed))
+		for i, name := range allowed {
+			result[i] = informationSchemaColumn{name: name, key: name}
+		}
+		return result, nil
+	}
+
+	result := make([]informationSchemaColumn, 0, len(fields.Fields))
+	for _, field := range fields.Fields {
+		if field.WildCard != nil {
+			return nil, fmt.Errorf("mixing wildcards with explicit columns is not supported")
+		}
+
+		columnExpr, ok := field.Expr.(*ast.ColumnNameExpr)
+		if !ok {
+			return nil, fmt.Errorf("unsupported column expression")
+		}
+
+		key := strings.ToUpper(columnExpr.Name.Name.O)
+		if _, ok := allowedSet[key]; !ok {
+			// Keep the column but values may be nil if unsupported
+		}
+
+		name := field.AsName.O
+		if name == "" {
+			name = columnExpr.Name.Name.O
+		}
+
+		result = append(result, informationSchemaColumn{name: name, key: key})
+	}
+
+	return result, nil
+}
+
+func limitOffsetFromStmt(stmt *ast.SelectStmt) (int, int, error) {
+	limit := -1
+	offset := 0
+
+	if stmt.Limit == nil {
+		return limit, offset, nil
+	}
+
+	count, err := valueExprToInt(stmt.Limit.Count)
+	if err != nil {
+		return 0, 0, err
+	}
+	limit = count
+
+	if stmt.Limit.Offset != nil {
+		off, err := valueExprToInt(stmt.Limit.Offset)
+		if err != nil {
+			return 0, 0, err
+		}
+		offset = off
+	}
+
+	return limit, offset, nil
+}
+
+func valueExprToString(expr ast.ExprNode) (string, bool) {
+	ve, ok := expr.(ast.ValueExpr)
+	if !ok {
+		return "", false
+	}
+	switch v := ve.GetValue().(type) {
+	case string:
+		return v, true
+	case []byte:
+		return string(v), true
+	default:
+		return ve.GetString(), true
+	}
+}
+
+func valueExprToInt(expr ast.ExprNode) (int, error) {
+	ve, ok := expr.(ast.ValueExpr)
+	if !ok {
+		return 0, fmt.Errorf("unsupported expression type")
+	}
+	switch v := ve.GetValue().(type) {
+	case int64:
+		if v < 0 {
+			return 0, fmt.Errorf("negative value")
+		}
+		if v > math.MaxInt {
+			return 0, fmt.Errorf("value too large")
+		}
+		return int(v), nil
+	case uint64:
+		if v > math.MaxInt {
+			return 0, fmt.Errorf("value too large")
+		}
+		return int(v), nil
+	case string:
+		iv, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, err
+		}
+		if iv < 0 {
+			return 0, fmt.Errorf("negative value")
+		}
+		return iv, nil
+	default:
+		return 0, fmt.Errorf("unsupported value type %T", v)
+	}
+}
+
+func shouldIncludeFakeDatabase(where ast.ExprNode) bool {
+	if where == nil {
+		return true
+	}
+	values := collectColumnEqualValues(where, "TABLE_SCHEMA")
+	if len(values) == 0 {
+		return true
+	}
+	for _, v := range values {
+		if strings.EqualFold(v, fakeDatabaseName) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractTableNameFilters(where ast.ExprNode, collections map[string]*collection.Collection) []string {
+	values := collectColumnEqualValues(where, "TABLE_NAME")
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	names := make([]string, 0, len(values))
+	for _, v := range values {
+		if _, ok := collections[v]; !ok {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		names = append(names, v)
+	}
+	return names
+}
+
+func collectColumnEqualValues(expr ast.ExprNode, target string) []string {
+	var values []string
+	var visit func(ast.ExprNode)
+	visit = func(e ast.ExprNode) {
+		switch x := e.(type) {
+		case *ast.BinaryOperationExpr:
+			if x.Op == opcode.EQ {
+				if name := columnNameFromExpr(x.L); name != "" && strings.EqualFold(name, target) {
+					if val, ok := stringValueFromExpr(x.R); ok {
+						values = append(values, val)
+					} else if isDatabaseFunction(x.R) {
+						values = append(values, fakeDatabaseName)
+					}
+				} else if name := columnNameFromExpr(x.R); name != "" && strings.EqualFold(name, target) {
+					if val, ok := stringValueFromExpr(x.L); ok {
+						values = append(values, val)
+					} else if isDatabaseFunction(x.L) {
+						values = append(values, fakeDatabaseName)
+					}
+				}
+			}
+			visit(x.L)
+			visit(x.R)
+		case *ast.ParenthesesExpr:
+			visit(x.Expr)
+		}
+	}
+	visit(expr)
+	return values
+}
+
+func columnNameFromExpr(expr ast.ExprNode) string {
+	if col, ok := expr.(*ast.ColumnNameExpr); ok {
+		return col.Name.Name.O
+	}
+	return ""
+}
+
+func stringValueFromExpr(expr ast.ExprNode) (string, bool) {
+	ve, ok := expr.(ast.ValueExpr)
+	if !ok {
+		return "", false
+	}
+	switch v := ve.GetValue().(type) {
+	case string:
+		return v, true
+	case []byte:
+		return string(v), true
+	default:
+		return "", false
+	}
+}
+
+func isDatabaseFunction(expr ast.ExprNode) bool {
+	fn, ok := expr.(*ast.FuncCallExpr)
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(fn.FnName.O, "database") && len(fn.Args) == 0
 }
 
 func parseIdentifierToken(token string) (string, error) {
@@ -461,127 +864,6 @@ func (h *handler) handleShowVariables(query string) (*mysql.Result, error) {
 		return buildSimpleResult([]string{"Variable_name", "Value"}, [][]interface{}{{"autocommit", "ON"}})
 	}
 	return buildSimpleResult([]string{"Variable_name", "Value"}, nil)
-}
-
-func parseInformationSchemaColumns(columns string, allowed []string) []informationSchemaColumn {
-	trimmed := strings.TrimSpace(columns)
-	if trimmed == "*" {
-		result := make([]informationSchemaColumn, len(allowed))
-		for i, name := range allowed {
-			result[i] = informationSchemaColumn{name: name, key: name}
-		}
-		return result
-	}
-
-	parts := strings.Split(trimmed, ",")
-	result := make([]informationSchemaColumn, 0, len(parts))
-	for _, part := range parts {
-		piece := strings.TrimSpace(part)
-		if piece == "" {
-			continue
-		}
-
-		upper := strings.ToUpper(piece)
-		if idx := strings.Index(upper, " AS "); idx >= 0 {
-			alias := strings.TrimSpace(piece[idx+4:])
-			base := strings.TrimSpace(piece[:idx])
-			result = append(result, informationSchemaColumn{name: alias, key: normalizeInformationSchemaColumn(base)})
-			continue
-		}
-
-		result = append(result, informationSchemaColumn{name: piece, key: normalizeInformationSchemaColumn(piece)})
-	}
-
-	return result
-}
-
-func normalizeInformationSchemaColumn(col string) string {
-	col = strings.TrimSpace(col)
-	col = strings.Trim(col, "`\"")
-	if idx := strings.LastIndex(col, "."); idx >= 0 {
-		col = col[idx+1:]
-	}
-	return strings.ToUpper(col)
-}
-
-func shouldIncludeFakeDatabase(rest string) bool {
-	upper := strings.ToUpper(rest)
-	if !strings.Contains(upper, "TABLE_SCHEMA") {
-		return true
-	}
-
-	if strings.Contains(upper, "DATABASE()") {
-		return true
-	}
-
-	matches := quotedStringRegexp.FindAllStringSubmatch(rest, -1)
-	if len(matches) == 0 {
-		if strings.Contains(upper, strings.ToUpper(fakeDatabaseName)) {
-			return true
-		}
-		return false
-	}
-
-	fakeUpper := strings.ToUpper(fakeDatabaseName)
-	for _, match := range matches {
-		if strings.ToUpper(match[1]) == fakeUpper {
-			return true
-		}
-	}
-
-	return false
-}
-
-func extractTableNameFilters(rest string, collections map[string]*collection.Collection) []string {
-	matches := tableNameEqualsRegexp.FindAllStringSubmatch(rest, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-
-	seen := make(map[string]struct{}, len(matches))
-	names := make([]string, 0, len(matches))
-	for _, match := range matches {
-		var name string
-		switch {
-		case len(match) > 1 && match[1] != "":
-			name = match[1]
-		case len(match) > 2 && match[2] != "":
-			name = match[2]
-		case len(match) > 3 && match[3] != "":
-			name = match[3]
-		}
-		if name == "" {
-			continue
-		}
-		if _, ok := collections[name]; !ok {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		names = append(names, name)
-	}
-
-	return names
-}
-
-func parseLimitOffset(rest string) (limit int, offset int) {
-	limit = -1
-	offset = 0
-
-	if m := limitRegexp.FindStringSubmatch(rest); len(m) == 2 {
-		if v, err := strconv.Atoi(m[1]); err == nil {
-			limit = v
-		}
-	}
-	if m := offsetRegexp.FindStringSubmatch(rest); len(m) == 2 {
-		if v, err := strconv.Atoi(m[1]); err == nil {
-			offset = v
-		}
-	}
-
-	return
 }
 
 func informationSchemaTableRow(name string) map[string]interface{} {
@@ -663,6 +945,15 @@ func buildSimpleResult(names []string, values [][]interface{}) (*mysql.Result, e
 	if err != nil {
 		return nil, err
 	}
+	for i, name := range names {
+		if i >= len(rs.Fields) {
+			break
+		}
+		if rs.Fields[i] == nil {
+			rs.Fields[i] = &mysql.Field{}
+		}
+		rs.Fields[i].Name = utils.StringToByteSlice(name)
+	}
 	return &mysql.Result{Resultset: rs}, nil
 }
 
@@ -722,146 +1013,6 @@ func trimTrailingSemicolon(q string) string {
 		q = strings.TrimSpace(q[:len(q)-1])
 	}
 	return strings.TrimSpace(q)
-}
-
-func parseInsertValues(valuesRaw string) ([]map[string]any, error) {
-	tuples, err := splitValueTuples(valuesRaw)
-	if err != nil {
-		return nil, err
-	}
-
-	docs := make([]map[string]any, 0, len(tuples))
-	for _, tuple := range tuples {
-		tuple = strings.TrimSpace(tuple)
-		if tuple == "" {
-			continue
-		}
-
-		var jsonPayload string
-		switch {
-		case strings.HasPrefix(tuple, "'") && strings.HasSuffix(tuple, "'"):
-			payload := tuple[1 : len(tuple)-1]
-			unescaped, err := unescapeSQLString(payload)
-			if err != nil {
-				return nil, err
-			}
-			jsonPayload = unescaped
-		case strings.HasPrefix(tuple, "\"") && strings.HasSuffix(tuple, "\""):
-			payload := tuple[1 : len(tuple)-1]
-			unescaped, err := unescapeSQLString(payload)
-			if err != nil {
-				return nil, err
-			}
-			jsonPayload = unescaped
-		default:
-			jsonPayload = tuple
-		}
-
-		item := map[string]any{}
-		if err := json.Unmarshal([]byte(jsonPayload), &item); err != nil {
-			return nil, err
-		}
-		docs = append(docs, item)
-	}
-
-	if len(docs) == 0 {
-		return nil, fmt.Errorf("empty insert payload")
-	}
-
-	return docs, nil
-}
-
-func splitValueTuples(valuesRaw string) ([]string, error) {
-	input := strings.TrimSpace(valuesRaw)
-	var tuples []string
-	depth := 0
-	inString := false
-	escape := false
-	start := -1
-
-	for i := 0; i < len(input); i++ {
-		c := input[i]
-
-		if inString {
-			if escape {
-				escape = false
-				continue
-			}
-			if c == '\\' {
-				escape = true
-				continue
-			}
-			if c == '\'' {
-				inString = false
-			}
-			continue
-		}
-
-		switch c {
-		case '\'':
-			inString = true
-		case '(':
-			if depth == 0 {
-				start = i + 1
-			}
-			depth++
-		case ')':
-			depth--
-			if depth < 0 {
-				return nil, fmt.Errorf("unexpected closing parenthesis")
-			}
-			if depth == 0 {
-				tuples = append(tuples, strings.TrimSpace(input[start:i]))
-				start = -1
-			}
-		case ',':
-			// separator between tuples when depth == 0
-		case ' ', '\t', '\r', '\n':
-			// ignore
-		default:
-			// nothing to do
-		}
-	}
-
-	if depth != 0 {
-		return nil, fmt.Errorf("unterminated value list")
-	}
-
-	if len(tuples) == 0 {
-		return nil, fmt.Errorf("empty values list")
-	}
-
-	return tuples, nil
-}
-
-func unescapeSQLString(input string) (string, error) {
-	var builder strings.Builder
-	builder.Grow(len(input))
-
-	for i := 0; i < len(input); i++ {
-		c := input[i]
-		if c == '\\' {
-			i++
-			if i >= len(input) {
-				return "", fmt.Errorf("invalid escaped sequence")
-			}
-			builder.WriteByte(input[i])
-			continue
-		}
-		if c == '\'' {
-			if i+1 < len(input) && input[i+1] == '\'' {
-				builder.WriteByte('\'')
-				i++
-				continue
-			}
-			// Lone quote inside the payload should be treated as literal
-			builder.WriteByte('\'')
-			continue
-		}
-		builder.WriteByte(c)
-	}
-
-	return builder.String(), nil
 }
 
 func defaultCollectionDefaults() map[string]any {

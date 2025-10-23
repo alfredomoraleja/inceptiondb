@@ -99,6 +99,7 @@ func (h *handler) UseDB(dbName string) error {
 
 func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 	q := normalizeQuery(query)
+	fmt.Println("QUERY:", q)
 	if q == "" {
 		return &mysql.Result{}, nil
 	}

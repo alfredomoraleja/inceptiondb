@@ -23,14 +23,16 @@ type handler struct {
 const fakeDatabaseName = "inceptiondb"
 
 var (
-	createCollectionRegexp              = regexp.MustCompile(`(?i)^CREATE\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
-	dropCollectionRegexp                = regexp.MustCompile(`(?i)^DROP\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
-	insertRegexp                        = regexp.MustCompile(`(?i)^INSERT\s+INTO\s+([a-zA-Z0-9_\-]+)(?:\s*\(\s*document\s*\))?\s+VALUES\s*(.+)$`)
-	selectRegexp                        = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s+FROM\\s+(?:(`[^`]+`|[a-zA-Z0-9_\\-]+)\\.)?(`[^`]+`|[a-zA-Z0-9_\\-]+)(?:\\s+LIMIT\\s+(\\d+))?(?:\\s+OFFSET\\s+(\\d+))?$")
-	informationSchemaTablesSelectRegexp = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+FROM\s+information_schema\.tables\b(.*)$`)
-	quotedStringRegexp                  = regexp.MustCompile(`'([^']*)'`)
-	limitRegexp                         = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)`)
-	offsetRegexp                        = regexp.MustCompile(`(?i)\bOFFSET\s+(\d+)`)
+	createCollectionRegexp               = regexp.MustCompile(`(?i)^CREATE\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
+	dropCollectionRegexp                 = regexp.MustCompile(`(?i)^DROP\s+COLLECTION\s+([a-zA-Z0-9_\-]+)$`)
+	insertRegexp                         = regexp.MustCompile(`(?i)^INSERT\s+INTO\s+([a-zA-Z0-9_\-]+)(?:\s*\(\s*document\s*\))?\s+VALUES\s*(.+)$`)
+	selectRegexp                         = regexp.MustCompile("(?i)^SELECT\\s+\\*\\s+FROM\\s+(?:(`[^`]+`|[a-zA-Z0-9_\\-]+)\\.)?(`[^`]+`|[a-zA-Z0-9_\\-]+)(?:\\s+LIMIT\\s+(\\d+))?(?:\\s+OFFSET\\s+(\\d+))?$")
+	informationSchemaTablesSelectRegexp  = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+FROM\s+information_schema\.tables\b(.*)$`)
+	informationSchemaColumnsSelectRegexp = regexp.MustCompile(`(?is)^SELECT\s+(.+?)\s+FROM\s+information_schema\.columns\b(.*)$`)
+	quotedStringRegexp                   = regexp.MustCompile(`'([^']*)'`)
+	tableNameEqualsRegexp                = regexp.MustCompile("(?is)TABLE_NAME\\s*=\\s*(?:'([^']*)'|`([^`]+)`|([a-zA-Z0-9_\\-\\.]+))")
+	limitRegexp                          = regexp.MustCompile(`(?i)\bLIMIT\s+(\d+)`)
+	offsetRegexp                         = regexp.MustCompile(`(?i)\bOFFSET\s+(\d+)`)
 )
 
 var informationSchemaTablesAllColumns = []string{
@@ -55,6 +57,31 @@ var informationSchemaTablesAllColumns = []string{
 	"CHECKSUM",
 	"CREATE_OPTIONS",
 	"TABLE_COMMENT",
+}
+
+var informationSchemaColumnsAllColumns = []string{
+	"TABLE_CATALOG",
+	"TABLE_SCHEMA",
+	"TABLE_NAME",
+	"COLUMN_NAME",
+	"ORDINAL_POSITION",
+	"COLUMN_DEFAULT",
+	"IS_NULLABLE",
+	"DATA_TYPE",
+	"CHARACTER_MAXIMUM_LENGTH",
+	"CHARACTER_OCTET_LENGTH",
+	"NUMERIC_PRECISION",
+	"NUMERIC_SCALE",
+	"DATETIME_PRECISION",
+	"CHARACTER_SET_NAME",
+	"COLLATION_NAME",
+	"COLUMN_TYPE",
+	"COLUMN_KEY",
+	"EXTRA",
+	"PRIVILEGES",
+	"COLUMN_COMMENT",
+	"GENERATION_EXPRESSION",
+	"SRS_ID",
 }
 
 type informationSchemaColumn struct {
@@ -97,6 +124,8 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 		return buildSimpleResult([]string{"1"}, [][]interface{}{{1}})
 	case informationSchemaTablesSelectRegexp.MatchString(q):
 		return h.handleInformationSchemaTablesSelect(q)
+	case informationSchemaColumnsSelectRegexp.MatchString(q):
+		return h.handleInformationSchemaColumnsSelect(q)
 	case strings.HasPrefix(upper, "SELECT"):
 		return h.handleSelect(q)
 	case strings.HasPrefix(upper, "SET "):
@@ -253,7 +282,7 @@ func (h *handler) handleInformationSchemaTablesSelect(query string) (*mysql.Resu
 	columnsPart := strings.TrimSpace(matches[1])
 	rest := matches[2]
 
-	columns := parseInformationSchemaTablesColumns(columnsPart)
+	columns := parseInformationSchemaColumns(columnsPart, informationSchemaTablesAllColumns)
 	include := shouldIncludeFakeDatabase(rest)
 	limit, offset := parseLimitOffset(rest)
 
@@ -289,6 +318,59 @@ func (h *handler) handleInformationSchemaTablesSelect(query string) (*mysql.Resu
 	fieldNames := make([]string, len(columns))
 	for i, col := range columns {
 		fieldNames[i] = col.name
+	}
+
+	return buildSimpleResult(fieldNames, values)
+}
+
+func (h *handler) handleInformationSchemaColumnsSelect(query string) (*mysql.Result, error) {
+	matches := informationSchemaColumnsSelectRegexp.FindStringSubmatch(query)
+	if len(matches) != 3 {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid information_schema query")
+	}
+
+	columnsPart := strings.TrimSpace(matches[1])
+	rest := matches[2]
+
+	columns := parseInformationSchemaColumns(columnsPart, informationSchemaColumnsAllColumns)
+	fieldNames := make([]string, len(columns))
+	for i, col := range columns {
+		fieldNames[i] = col.name
+	}
+
+	if !shouldIncludeFakeDatabase(rest) {
+		return buildSimpleResult(fieldNames, nil)
+	}
+
+	collections := h.svc.ListCollections()
+	tableNames := extractTableNameFilters(rest, collections)
+	if len(tableNames) == 0 {
+		tableNames = make([]string, 0, len(collections))
+		for name := range collections {
+			tableNames = append(tableNames, name)
+		}
+		sort.Strings(tableNames)
+	}
+
+	limit, offset := parseLimitOffset(rest)
+	if offset >= len(tableNames) {
+		tableNames = nil
+	} else if offset > 0 {
+		tableNames = tableNames[offset:]
+	}
+
+	if limit >= 0 && limit < len(tableNames) {
+		tableNames = tableNames[:limit]
+	}
+
+	values := make([][]interface{}, 0, len(tableNames))
+	for _, name := range tableNames {
+		rowInfo := informationSchemaColumnRow(name)
+		row := make([]interface{}, len(columns))
+		for i, col := range columns {
+			row[i] = rowInfo[col.key]
+		}
+		values = append(values, row)
 	}
 
 	return buildSimpleResult(fieldNames, values)
@@ -380,11 +462,11 @@ func (h *handler) handleShowVariables(query string) (*mysql.Result, error) {
 	return buildSimpleResult([]string{"Variable_name", "Value"}, nil)
 }
 
-func parseInformationSchemaTablesColumns(columns string) []informationSchemaColumn {
+func parseInformationSchemaColumns(columns string, allowed []string) []informationSchemaColumn {
 	trimmed := strings.TrimSpace(columns)
 	if trimmed == "*" {
-		result := make([]informationSchemaColumn, len(informationSchemaTablesAllColumns))
-		for i, name := range informationSchemaTablesAllColumns {
+		result := make([]informationSchemaColumn, len(allowed))
+		for i, name := range allowed {
 			result[i] = informationSchemaColumn{name: name, key: name}
 		}
 		return result
@@ -449,6 +531,40 @@ func shouldIncludeFakeDatabase(rest string) bool {
 	return false
 }
 
+func extractTableNameFilters(rest string, collections map[string]*collection.Collection) []string {
+	matches := tableNameEqualsRegexp.FindAllStringSubmatch(rest, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(matches))
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		var name string
+		switch {
+		case len(match) > 1 && match[1] != "":
+			name = match[1]
+		case len(match) > 2 && match[2] != "":
+			name = match[2]
+		case len(match) > 3 && match[3] != "":
+			name = match[3]
+		}
+		if name == "" {
+			continue
+		}
+		if _, ok := collections[name]; !ok {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	return names
+}
+
 func parseLimitOffset(rest string) (limit int, offset int) {
 	limit = -1
 	offset = 0
@@ -490,6 +606,33 @@ func informationSchemaTableRow(name string) map[string]interface{} {
 		"CHECKSUM":        nil,
 		"CREATE_OPTIONS":  "",
 		"TABLE_COMMENT":   "",
+	}
+}
+
+func informationSchemaColumnRow(name string) map[string]interface{} {
+	return map[string]interface{}{
+		"TABLE_CATALOG":            "def",
+		"TABLE_SCHEMA":             fakeDatabaseName,
+		"TABLE_NAME":               name,
+		"COLUMN_NAME":              "document",
+		"ORDINAL_POSITION":         "1",
+		"COLUMN_DEFAULT":           nil,
+		"IS_NULLABLE":              "YES",
+		"DATA_TYPE":                "json",
+		"CHARACTER_MAXIMUM_LENGTH": nil,
+		"CHARACTER_OCTET_LENGTH":   nil,
+		"NUMERIC_PRECISION":        nil,
+		"NUMERIC_SCALE":            nil,
+		"DATETIME_PRECISION":       nil,
+		"CHARACTER_SET_NAME":       nil,
+		"COLLATION_NAME":           nil,
+		"COLUMN_TYPE":              "json",
+		"COLUMN_KEY":               "",
+		"EXTRA":                    "",
+		"PRIVILEGES":               "select,insert,update,references",
+		"COLUMN_COMMENT":           "",
+		"GENERATION_EXPRESSION":    "",
+		"SRS_ID":                   nil,
 	}
 }
 

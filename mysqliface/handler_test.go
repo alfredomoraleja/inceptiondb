@@ -336,6 +336,98 @@ func TestSelectInformationSchemaTablesStar(t *testing.T) {
 	}
 }
 
+func TestSelectInformationSchemaColumnsBySchema(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	if _, err := svc.CreateCollection("alpha"); err != nil {
+		t.Fatalf("createCollection alpha: %v", err)
+	}
+	if _, err := svc.CreateCollection("beta"); err != nil {
+		t.Fatalf("createCollection beta: %v", err)
+	}
+
+	h := NewHandler(svc, "v-test")
+	query := "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE FROM information_schema.columns WHERE TABLE_SCHEMA='inceptiondb' ORDER BY TABLE_NAME"
+	res, err := h.HandleQuery(query)
+	if err != nil {
+		t.Fatalf("information_schema columns: %v", err)
+	}
+	defer res.Close()
+
+	if got := len(res.Resultset.RowDatas); got != 2 {
+		t.Fatalf("expected 2 rows, got %d", got)
+	}
+
+	first, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse first row: %v", err)
+	}
+	second, err := res.Resultset.RowDatas[1].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse second row: %v", err)
+	}
+
+	if string(first[0].AsString()) != "alpha" || string(second[0].AsString()) != "beta" {
+		t.Fatalf("expected table names alpha, beta got %q, %q", first[0].AsString(), second[0].AsString())
+	}
+	if string(first[1].AsString()) != "document" || string(second[1].AsString()) != "document" {
+		t.Fatalf("expected document column names, got %q, %q", first[1].AsString(), second[1].AsString())
+	}
+	if string(first[2].AsString()) != "json" || string(second[2].AsString()) != "json" {
+		t.Fatalf("expected json data type, got %q, %q", first[2].AsString(), second[2].AsString())
+	}
+}
+
+func TestSelectInformationSchemaColumnsFilteredByTable(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	if _, err := svc.CreateCollection("alpha"); err != nil {
+		t.Fatalf("createCollection alpha: %v", err)
+	}
+	if _, err := svc.CreateCollection("beta"); err != nil {
+		t.Fatalf("createCollection beta: %v", err)
+	}
+
+	h := NewHandler(svc, "v-test")
+	res, err := h.HandleQuery("SELECT * FROM information_schema.columns WHERE TABLE_SCHEMA='inceptiondb' AND TABLE_NAME='beta'")
+	if err != nil {
+		t.Fatalf("information_schema columns filtered: %v", err)
+	}
+	defer res.Close()
+
+	if got := len(res.Resultset.RowDatas); got != 1 {
+		t.Fatalf("expected 1 row, got %d", got)
+	}
+
+	row, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse row: %v", err)
+	}
+
+	fieldIndex := func(name string) int {
+		upper := strings.ToUpper(name)
+		for i, field := range res.Resultset.Fields {
+			if strings.ToUpper(string(field.Name)) == upper {
+				return i
+			}
+		}
+		t.Fatalf("field %s not found", name)
+		return -1
+	}
+
+	if got := string(row[fieldIndex("TABLE_NAME")].AsString()); got != "beta" {
+		t.Fatalf("expected TABLE_NAME beta, got %q", got)
+	}
+	if got := string(row[fieldIndex("COLUMN_NAME")].AsString()); got != "document" {
+		t.Fatalf("expected COLUMN_NAME document, got %q", got)
+	}
+	if got := string(row[fieldIndex("ORDINAL_POSITION")].AsString()); got != "1" {
+		t.Fatalf("expected ORDINAL_POSITION 1, got %q", got)
+	}
+}
+
 func TestShowVariables(t *testing.T) {
 	svc := newMockService(t)
 	t.Cleanup(svc.Close)

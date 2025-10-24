@@ -165,6 +165,26 @@ func TestHandlerSelectMapsFirstLevelColumns(t *testing.T) {
 		t.Fatalf("unexpected insert error: %v", err)
 	}
 
+	assertSelectMapsFirstLevelColumns(t, h)
+}
+
+func TestHandlerInsertSetMapsFirstLevelColumns(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	insert := `INSERT INTO people SET name='John', age=33, address='{"street":"Elm","zip":"13245HH"}', colors='["red","green"]'`
+	if _, err := h.HandleQuery(insert); err != nil {
+		t.Fatalf("unexpected insert error: %v", err)
+	}
+
+	assertSelectMapsFirstLevelColumns(t, h)
+}
+
+func assertSelectMapsFirstLevelColumns(t *testing.T, h *handler) {
+	t.Helper()
+
 	res, err := h.HandleQuery("SELECT * FROM people")
 	if err != nil {
 		t.Fatalf("unexpected select error: %v", err)

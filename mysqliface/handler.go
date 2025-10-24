@@ -81,6 +81,8 @@ var (
 	}
 )
 
+var errUnsupportedExpression = errors.New("unsupported expression type")
+
 type informationSchemaColumn struct {
 	name string
 	key  string
@@ -342,35 +344,51 @@ func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
 		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, schema)
 	}
 
-	if stmt.Setlist || stmt.Select != nil {
+	if stmt.Select != nil {
 		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported insert form")
 	}
 
-	if len(stmt.Lists) == 0 {
-		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid insert statement")
-	}
+	var docs []map[string]any
 
-	if len(stmt.Columns) > 0 {
-		if len(stmt.Columns) != 1 || !strings.EqualFold(stmt.Columns[0].Name.O, "document") {
-			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only document column inserts are supported")
+	if stmt.Setlist {
+		if len(stmt.Lists) != 1 {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid insert statement")
 		}
-	}
-
-	docs := make([]map[string]any, 0, len(stmt.Lists))
-	for _, row := range stmt.Lists {
-		if len(row) != 1 {
-			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only single column inserts are supported")
-		}
-		payload, ok := valueExprToString(row[0])
-		if !ok {
-			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "document must be a string literal")
-		}
-
-		item := map[string]any{}
-		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+		doc, err := documentFromSetList(stmt.Columns, stmt.Lists[0])
+		if err != nil {
+			if errors.Is(err, errUnsupportedExpression) {
+				return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
+			}
 			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
 		}
-		docs = append(docs, item)
+		docs = append(docs, doc)
+	} else {
+		if len(stmt.Lists) == 0 {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid insert statement")
+		}
+
+		if len(stmt.Columns) > 0 {
+			if len(stmt.Columns) != 1 || !strings.EqualFold(stmt.Columns[0].Name.O, "document") {
+				return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only document column inserts are supported")
+			}
+		}
+
+		docs = make([]map[string]any, 0, len(stmt.Lists))
+		for _, row := range stmt.Lists {
+			if len(row) != 1 {
+				return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only single column inserts are supported")
+			}
+			payload, ok := valueExprToString(row[0])
+			if !ok {
+				return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "document must be a string literal")
+			}
+
+			item := map[string]any{}
+			if err := json.Unmarshal([]byte(payload), &item); err != nil {
+				return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+			}
+			docs = append(docs, item)
+		}
 	}
 
 	if len(docs) == 0 {
@@ -759,6 +777,57 @@ func limitOffsetFromStmt(stmt *ast.SelectStmt) (int, int, error) {
 	}
 
 	return limit, offset, nil
+}
+
+func documentFromSetList(columns []*ast.ColumnName, values []ast.ExprNode) (map[string]any, error) {
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("invalid insert statement")
+	}
+	if len(values) != len(columns) {
+		return nil, fmt.Errorf("mismatched columns and values")
+	}
+
+	doc := make(map[string]any, len(columns))
+	for i, column := range columns {
+		if column == nil {
+			return nil, fmt.Errorf("invalid column")
+		}
+		name := column.Name.O
+		if name == "" {
+			return nil, fmt.Errorf("invalid column name")
+		}
+
+		value, err := valueExprToInterface(values[i])
+		if err != nil {
+			return nil, err
+		}
+
+		doc[name] = value
+	}
+
+	return doc, nil
+}
+
+func valueExprToInterface(expr ast.ExprNode) (any, error) {
+	ve, ok := expr.(ast.ValueExpr)
+	if !ok {
+		return nil, errUnsupportedExpression
+	}
+
+	switch v := ve.GetValue().(type) {
+	case nil:
+		return nil, nil
+	case bool, int64, uint64, float64:
+		return v, nil
+	case float32:
+		return float64(v), nil
+	case string:
+		return v, nil
+	case []byte:
+		return string(v), nil
+	default:
+		return ve.GetString(), nil
+	}
 }
 
 func valueExprToString(expr ast.ExprNode) (string, bool) {

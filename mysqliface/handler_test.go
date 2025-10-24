@@ -305,6 +305,87 @@ func TestHandlerSelectWhereFiltersRows(t *testing.T) {
 	res.Close()
 }
 
+func TestHandlerSelectProjection(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	docs := []string{
+		`{"name":"John","age":33,"address":{"street":{"name":"Elm","number":5}}}`,
+		`{"name":"Alice","age":30,"address":{"street":{"name":"Pine","number":3}}}`,
+	}
+	for _, doc := range docs {
+		if _, err := h.HandleQuery("INSERT INTO people VALUES ('" + doc + "')"); err != nil {
+			t.Fatalf("unexpected insert error: %v", err)
+		}
+	}
+
+	res, err := h.HandleQuery("SELECT name FROM people")
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	columnNames, rows := parseResultRows(t, res)
+	if len(columnNames) != 1 || columnNames[0] != "name" {
+		t.Fatalf("expected single column 'name', got %v", columnNames)
+	}
+	if len(rows) != len(docs) {
+		t.Fatalf("expected %d rows, got %d", len(docs), len(rows))
+	}
+	expectedNames := map[string]bool{"John": false, "Alice": false}
+	for _, row := range rows {
+		if len(row) != 1 {
+			t.Fatalf("expected row with single column, got %v", row)
+		}
+		name, ok := row["name"]
+		if !ok {
+			t.Fatalf("expected row to contain 'name' column")
+		}
+		if _, found := expectedNames[name]; !found {
+			t.Fatalf("unexpected name value %q", name)
+		}
+		expectedNames[name] = true
+	}
+	for value, seen := range expectedNames {
+		if !seen {
+			t.Fatalf("expected to find name %q in result", value)
+		}
+	}
+	res.Close()
+
+	res, err = h.HandleQuery("SELECT address.street.number FROM people WHERE name = 'Alice'")
+	if err != nil {
+		t.Fatalf("unexpected nested select error: %v", err)
+	}
+	columnNames, rows = parseResultRows(t, res)
+	if len(columnNames) != 1 || columnNames[0] != "address.street.number" {
+		t.Fatalf("expected column name 'address.street.number', got %v", columnNames)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if got := rows[0]["address.street.number"]; got != "3" {
+		t.Fatalf("expected nested number '3', got %q", got)
+	}
+	res.Close()
+
+	res, err = h.HandleQuery("SELECT address.street.number AS street_number FROM people WHERE name = 'Alice'")
+	if err != nil {
+		t.Fatalf("unexpected aliased select error: %v", err)
+	}
+	columnNames, rows = parseResultRows(t, res)
+	if len(columnNames) != 1 || columnNames[0] != "street_number" {
+		t.Fatalf("expected column name 'street_number', got %v", columnNames)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if got := rows[0]["street_number"]; got != "3" {
+		t.Fatalf("expected aliased nested number '3', got %q", got)
+	}
+	res.Close()
+}
+
 func containsColumn(columns []string, target string) bool {
 	for _, column := range columns {
 		if column == target {

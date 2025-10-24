@@ -1,6 +1,7 @@
 package mysqliface
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,6 +144,12 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
 		}
 		return h.handleDelete(stmt)
+	case tokens[0] == "UPDATE":
+		stmt, err := h.parseUpdateStmt(q)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		return h.handleUpdate(stmt)
 	case tokens[0] == "SELECT":
 		stmt, err := h.parseSelectStmt(q)
 		if err != nil {
@@ -234,6 +241,18 @@ func (h *handler) parseDeleteStmt(query string) (*ast.DeleteStmt, error) {
 		return nil, fmt.Errorf("not a delete statement")
 	}
 	return deleteStmt, nil
+}
+
+func (h *handler) parseUpdateStmt(query string) (*ast.UpdateStmt, error) {
+	stmt, err := h.parseStatement(query)
+	if err != nil {
+		return nil, err
+	}
+	updateStmt, ok := stmt.(*ast.UpdateStmt)
+	if !ok {
+		return nil, fmt.Errorf("not an update statement")
+	}
+	return updateStmt, nil
 }
 
 func (h *handler) parseStatement(query string) (ast.StmtNode, error) {
@@ -510,6 +529,113 @@ func (h *handler) handleDelete(stmt *ast.DeleteStmt) (*mysql.Result, error) {
 			return nil, err
 		}
 		affected++
+	}
+
+	return &mysql.Result{AffectedRows: affected}, nil
+}
+
+func (h *handler) handleUpdate(stmt *ast.UpdateStmt) (*mysql.Result, error) {
+	if stmt.MultipleTable || stmt.Order != nil || len(stmt.TableHints) > 0 || stmt.With != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported update clause")
+	}
+
+	limit := -1
+	if stmt.Limit != nil {
+		if stmt.Limit.Offset != nil {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported update clause")
+		}
+		count, err := valueExprToInt(stmt.Limit.Count)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		limit = count
+	}
+
+	schema, name, err := extractSingleTableName(stmt.TableRefs)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported update target")
+	}
+
+	if schema != "" && !strings.EqualFold(schema, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, schema)
+	}
+
+	if name == "" {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid update statement")
+	}
+
+	patch, err := buildUpdatePatch(stmt.List, name)
+	if err != nil {
+		if errors.Is(err, errUnsupportedExpression) {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
+		}
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+	}
+
+	var filter documentFilter
+	if stmt.Where != nil {
+		filter, err = buildDocumentFilter(stmt.Where, name)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
+		}
+	}
+
+	col, err := h.svc.GetCollection(name)
+	if err != nil {
+		if errors.Is(err, service.ErrorCollectionNotFound) {
+			return nil, mysql.NewDefaultError(mysql.ER_BAD_TABLE_ERROR, name)
+		}
+		return nil, err
+	}
+
+	rowsToUpdate := make([]*collection.Row, 0)
+	var traverseErr error
+
+	col.TraverseRange(0, 0, func(row *collection.Row) {
+		if traverseErr != nil {
+			return
+		}
+		if limit > 0 && len(rowsToUpdate) >= limit {
+			return
+		}
+
+		if filter != nil {
+			doc, err := documentRawMap(row.Payload)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+
+			include, err := filter(doc)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+			if !include {
+				return
+			}
+		}
+
+		rowsToUpdate = append(rowsToUpdate, row)
+	})
+
+	if traverseErr != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, traverseErr.Error())
+	}
+
+	var affected uint64
+	for _, row := range rowsToUpdate {
+		row.PatchMutex.Lock()
+		original := append([]byte(nil), row.Payload...)
+		err := col.Patch(row, patch)
+		updated := !bytes.Equal(original, row.Payload)
+		row.PatchMutex.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		if updated {
+			affected++
+		}
 	}
 
 	return &mysql.Result{AffectedRows: affected}, nil
@@ -1284,6 +1410,63 @@ func documentFromSetList(columns []*ast.ColumnName, values []ast.ExprNode) (map[
 	}
 
 	return doc, nil
+}
+
+func buildUpdatePatch(assignments []*ast.Assignment, table string) (map[string]any, error) {
+	if len(assignments) == 0 {
+		return nil, fmt.Errorf("invalid update statement")
+	}
+
+	patch := make(map[string]any, len(assignments))
+	for _, assignment := range assignments {
+		if assignment == nil || assignment.Column == nil {
+			return nil, fmt.Errorf("invalid update assignment")
+		}
+
+		path, err := columnPathFromExpr(&ast.ColumnNameExpr{Name: assignment.Column}, table)
+		if err != nil {
+			return nil, err
+		}
+		if len(path) == 0 {
+			return nil, fmt.Errorf("invalid column reference")
+		}
+
+		value, err := valueExprToInterface(assignment.Expr)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := setPatchValue(patch, path, value); err != nil {
+			return nil, err
+		}
+	}
+
+	return patch, nil
+}
+
+func setPatchValue(target map[string]any, path []string, value any) error {
+	current := target
+	for i, part := range path {
+		if i == len(path)-1 {
+			current[part] = value
+			return nil
+		}
+
+		next, ok := current[part]
+		if !ok {
+			nested := make(map[string]any)
+			current[part] = nested
+			current = nested
+			continue
+		}
+
+		nested, ok := next.(map[string]any)
+		if !ok {
+			return fmt.Errorf("conflicting assignments for %s", strings.Join(path[:i+1], "."))
+		}
+		current = nested
+	}
+	return nil
 }
 
 func valueExprToInterface(expr ast.ExprNode) (any, error) {

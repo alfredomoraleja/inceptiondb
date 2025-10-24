@@ -137,6 +137,12 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
 		}
 		return h.handleInsert(stmt)
+	case tokens[0] == "DELETE":
+		stmt, err := h.parseDeleteStmt(q)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		return h.handleDelete(stmt)
 	case tokens[0] == "SELECT":
 		stmt, err := h.parseSelectStmt(q)
 		if err != nil {
@@ -216,6 +222,18 @@ func (h *handler) parseSelectStmt(query string) (*ast.SelectStmt, error) {
 		return nil, fmt.Errorf("not a select statement")
 	}
 	return selectStmt, nil
+}
+
+func (h *handler) parseDeleteStmt(query string) (*ast.DeleteStmt, error) {
+	stmt, err := h.parseStatement(query)
+	if err != nil {
+		return nil, err
+	}
+	deleteStmt, ok := stmt.(*ast.DeleteStmt)
+	if !ok {
+		return nil, fmt.Errorf("not a delete statement")
+	}
+	return deleteStmt, nil
 }
 
 func (h *handler) parseStatement(query string) (ast.StmtNode, error) {
@@ -412,6 +430,83 @@ func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
 			if strings.Contains(strings.ToLower(err.Error()), "conflict") {
 				return nil, mysql.NewError(mysql.ER_DUP_ENTRY, err.Error())
 			}
+			return nil, err
+		}
+		affected++
+	}
+
+	return &mysql.Result{AffectedRows: affected}, nil
+}
+
+func (h *handler) handleDelete(stmt *ast.DeleteStmt) (*mysql.Result, error) {
+	if stmt.IsMultiTable || stmt.Tables != nil || stmt.BeforeFrom || stmt.Order != nil || stmt.Limit != nil || len(stmt.TableHints) > 0 || stmt.With != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported delete clause")
+	}
+
+	schema, name, err := extractSingleTableName(stmt.TableRefs)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported delete target")
+	}
+
+	if schema != "" && !strings.EqualFold(schema, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, schema)
+	}
+
+	if name == "" {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid delete statement")
+	}
+
+	var filter documentFilter
+	if stmt.Where != nil {
+		filter, err = buildDocumentFilter(stmt.Where, name)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
+		}
+	}
+
+	col, err := h.svc.GetCollection(name)
+	if err != nil {
+		if errors.Is(err, service.ErrorCollectionNotFound) {
+			return nil, mysql.NewDefaultError(mysql.ER_BAD_TABLE_ERROR, name)
+		}
+		return nil, err
+	}
+
+	rowsToDelete := make([]*collection.Row, 0)
+	var traverseErr error
+
+	col.TraverseRange(0, 0, func(row *collection.Row) {
+		if traverseErr != nil {
+			return
+		}
+
+		if filter != nil {
+			doc, err := documentRawMap(row.Payload)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+
+			include, err := filter(doc)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+			if !include {
+				return
+			}
+		}
+
+		rowsToDelete = append(rowsToDelete, row)
+	})
+
+	if traverseErr != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, traverseErr.Error())
+	}
+
+	var affected uint64
+	for _, row := range rowsToDelete {
+		if err := col.Remove(row); err != nil {
 			return nil, err
 		}
 		affected++

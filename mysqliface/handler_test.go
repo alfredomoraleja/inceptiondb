@@ -1,6 +1,7 @@
 package mysqliface
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,11 +142,81 @@ func TestHandlerInsertAndSelect(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: parse row: %v", query, err)
 		}
-		if string(values[0].AsString()) == "" {
-			t.Fatalf("%s: expected payload, got empty string", query)
+		if got := string(res.Resultset.Fields[0].Name); got != "id" {
+			t.Fatalf("%s: expected column name 'id', got %q", query, got)
+		}
+
+		if got := string(values[0].AsString()); got != "1" {
+			t.Fatalf("%s: expected id '1', got %q", query, got)
 		}
 
 		res.Close()
+	}
+}
+
+func TestHandlerSelectMapsFirstLevelColumns(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	payload := `{"name":"John","age":33,"address":{"street":"Elm","zip":"13245HH"},"colors":["red","green"]}`
+	if _, err := h.HandleQuery("INSERT INTO people VALUES ('" + payload + "')"); err != nil {
+		t.Fatalf("unexpected insert error: %v", err)
+	}
+
+	res, err := h.HandleQuery("SELECT * FROM people")
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	t.Cleanup(res.Close)
+
+	if len(res.Resultset.RowDatas) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(res.Resultset.RowDatas))
+	}
+
+	fields := res.Resultset.Fields
+	gotNames := make([]string, len(fields))
+	for i, field := range fields {
+		gotNames[i] = string(field.Name)
+	}
+
+	expectedNames := []string{"address", "age", "colors", "id", "name"}
+	if strings.Join(gotNames, ",") != strings.Join(expectedNames, ",") {
+		t.Fatalf("expected columns %v, got %v", expectedNames, gotNames)
+	}
+
+	values, err := res.Resultset.RowDatas[0].ParseText(fields, nil)
+	if err != nil {
+		t.Fatalf("parse row: %v", err)
+	}
+
+	gotValues := map[string]string{}
+	for i, name := range gotNames {
+		switch v := values[i].Value().(type) {
+		case nil:
+			gotValues[name] = ""
+		case []byte:
+			gotValues[name] = string(v)
+		default:
+			gotValues[name] = fmt.Sprint(v)
+		}
+	}
+
+	if got := gotValues["name"]; got != "John" {
+		t.Fatalf("expected name 'John', got %q", got)
+	}
+	if got := gotValues["age"]; got != "33" {
+		t.Fatalf("expected age '33', got %q", got)
+	}
+	if got := gotValues["address"]; got != `{"street":"Elm","zip":"13245HH"}` {
+		t.Fatalf("expected address json, got %q", got)
+	}
+	if got := gotValues["colors"]; got != `["red","green"]` {
+		t.Fatalf("expected colors json, got %q", got)
+	}
+	if got := gotValues["id"]; got == "" {
+		t.Fatalf("expected generated id, got empty string")
 	}
 }
 

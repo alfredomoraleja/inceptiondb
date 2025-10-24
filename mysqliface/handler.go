@@ -582,17 +582,85 @@ func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*my
 		return nil, err
 	}
 
-	rows := make([][]interface{}, 0)
+	rowMaps := make([]map[string]interface{}, 0)
+	columnsSet := make(map[string]struct{})
+	var traverseErr error
+
 	to := 0
 	if limit > 0 {
 		to = offset + limit
 	}
 
 	col.TraverseRange(offset, to, func(row *collection.Row) {
-		rows = append(rows, []interface{}{string(row.Payload)})
+		if traverseErr != nil {
+			return
+		}
+
+		mapped, err := documentFirstLevelColumns(row.Payload)
+		if err != nil {
+			traverseErr = err
+			return
+		}
+
+		rowMaps = append(rowMaps, mapped)
+		for key := range mapped {
+			columnsSet[key] = struct{}{}
+		}
 	})
 
-	return buildSimpleResult([]string{"document"}, rows)
+	if traverseErr != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, traverseErr.Error())
+	}
+
+	columns := make([]string, 0, len(columnsSet))
+	for key := range columnsSet {
+		columns = append(columns, key)
+	}
+	sort.Strings(columns)
+
+	rows := make([][]interface{}, 0, len(rowMaps))
+	for _, mapped := range rowMaps {
+		row := make([]interface{}, len(columns))
+		for i, column := range columns {
+			row[i] = mapped[column]
+		}
+		rows = append(rows, row)
+	}
+
+	return buildSimpleResult(columns, rows)
+}
+
+func documentFirstLevelColumns(payload []byte) (map[string]interface{}, error) {
+	if len(payload) == 0 {
+		return map[string]interface{}{}, nil
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil, fmt.Errorf("decode document: %w", err)
+	}
+
+	result := make(map[string]interface{}, len(raw))
+	for key, value := range raw {
+		if value == nil {
+			result[key] = nil
+			continue
+		}
+
+		var decoded interface{}
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return nil, fmt.Errorf("decode field %q: %w", key, err)
+		}
+
+		switch decoded.(type) {
+		case map[string]interface{}, []interface{}:
+			result[key] = string(value)
+		default:
+			result[key] = decoded
+		}
+	}
+
+	return result, nil
 }
 
 func replaceFirstKeyword(query, keyword, replacement string) string {

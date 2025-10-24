@@ -681,6 +681,66 @@ func TestShowTablesUsesFakeDatabaseName(t *testing.T) {
 	}
 }
 
+func TestShowCreateCollection(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	if _, err := svc.CreateCollection("alpha"); err != nil {
+		t.Fatalf("createCollection alpha: %v", err)
+	}
+
+	h := NewHandler(svc, "v-test")
+
+	cases := []struct {
+		query       string
+		columnNames []string
+	}{
+		{"SHOW CREATE TABLE alpha", []string{"Table", "Create Table"}},
+		{"SHOW CREATE COLLECTION alpha", []string{"Collection", "Create Collection"}},
+	}
+
+	for _, tc := range cases {
+		res, err := h.HandleQuery(tc.query)
+		if err != nil {
+			t.Fatalf("show create error for %q: %v", tc.query, err)
+		}
+		func() {
+			defer res.Close()
+
+			if got := len(res.Resultset.Fields); got != len(tc.columnNames) {
+				t.Fatalf("%s: expected %d columns, got %d", tc.query, len(tc.columnNames), got)
+			}
+
+			for i, name := range tc.columnNames {
+				if got := string(res.Resultset.Fields[i].Name); got != name {
+					t.Fatalf("%s: expected column %d name %q, got %q", tc.query, i, name, got)
+				}
+			}
+
+			if got := len(res.Resultset.RowDatas); got != 1 {
+				t.Fatalf("%s: expected 1 row, got %d", tc.query, got)
+			}
+
+			row, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+			if err != nil {
+				t.Fatalf("%s: parse row: %v", tc.query, err)
+			}
+
+			if got := string(row[0].AsString()); got != "alpha" {
+				t.Fatalf("%s: expected collection name alpha, got %q", tc.query, got)
+			}
+
+			createStmt := string(row[1].AsString())
+			if !strings.Contains(createStmt, "CREATE TABLE `alpha`") {
+				t.Fatalf("%s: expected create statement to reference table, got %q", tc.query, createStmt)
+			}
+			if !strings.Contains(strings.ToLower(createStmt), "json") {
+				t.Fatalf("%s: expected create statement to describe json column, got %q", tc.query, createStmt)
+			}
+		}()
+	}
+}
+
 func TestSelectInformationSchemaTablesBySchema(t *testing.T) {
 	svc := newMockService(t)
 	t.Cleanup(svc.Close)

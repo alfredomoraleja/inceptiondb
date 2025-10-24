@@ -120,6 +120,12 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 		return h.handleShowCollections(q)
 	case len(tokens) >= 2 && tokens[0] == "SHOW" && (tokens[1] == "DATABASES" || tokens[1] == "SCHEMAS"):
 		return h.handleShowDatabases()
+	case len(tokens) >= 4 && tokens[0] == "SHOW" && tokens[1] == "CREATE" && (tokens[2] == "COLLECTION" || tokens[2] == "TABLE"):
+		stmt, err := h.parseShowCreateCollectionStmt(q, tokens[2] == "COLLECTION")
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		return h.handleShowCreateCollection(stmt, tokens[2] == "COLLECTION")
 	case len(tokens) >= 2 && tokens[0] == "CREATE" && (tokens[1] == "COLLECTION" || tokens[1] == "TABLE"):
 		stmt, err := h.parseCreateCollectionStmt(q)
 		if err != nil {
@@ -205,6 +211,25 @@ func (h *handler) parseDropCollectionStmt(query string) (*ast.DropTableStmt, err
 		return nil, fmt.Errorf("not a drop table statement")
 	}
 	return dropStmt, nil
+}
+
+func (h *handler) parseShowCreateCollectionStmt(query string, collectionKeyword bool) (*ast.ShowStmt, error) {
+	rewritten := query
+	if collectionKeyword {
+		rewritten = replaceFirstKeyword(rewritten, "COLLECTION", "TABLE")
+	}
+	stmt, err := h.parseStatement(rewritten)
+	if err != nil {
+		return nil, err
+	}
+	showStmt, ok := stmt.(*ast.ShowStmt)
+	if !ok {
+		return nil, fmt.Errorf("not a show statement")
+	}
+	if showStmt.Tp != ast.ShowCreateTable {
+		return nil, fmt.Errorf("not a show create table statement")
+	}
+	return showStmt, nil
 }
 
 func (h *handler) parseInsertStmt(query string) (*ast.InsertStmt, error) {
@@ -316,6 +341,38 @@ func (h *handler) handleShowCollections(query string) (*mysql.Result, error) {
 
 func (h *handler) handleShowDatabases() (*mysql.Result, error) {
 	return buildSimpleResult([]string{"Database"}, [][]interface{}{{fakeDatabaseName}})
+}
+
+func (h *handler) handleShowCreateCollection(stmt *ast.ShowStmt, isCollection bool) (*mysql.Result, error) {
+	if stmt.Table == nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid show create statement")
+	}
+
+	if stmt.Table.Schema.O != "" && !strings.EqualFold(stmt.Table.Schema.O, fakeDatabaseName) {
+		return nil, mysql.NewDefaultError(mysql.ER_BAD_DB_ERROR, stmt.Table.Schema.O)
+	}
+
+	name := stmt.Table.Name.O
+	if name == "" {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, "invalid show create statement")
+	}
+
+	if _, err := h.svc.GetCollection(name); err != nil {
+		if errors.Is(err, service.ErrorCollectionNotFound) {
+			return nil, mysql.NewDefaultError(mysql.ER_BAD_TABLE_ERROR, name)
+		}
+		return nil, err
+	}
+
+	createStmt := fmt.Sprintf("CREATE TABLE `%s` (\n  `document` json DEFAULT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4", name)
+
+	columns := []string{"Table", "Create Table"}
+	if isCollection {
+		columns = []string{"Collection", "Create Collection"}
+	}
+
+	values := [][]interface{}{{name, createStmt}}
+	return buildSimpleResult(columns, values)
 }
 
 func (h *handler) handleCreateCollection(stmt *ast.CreateTableStmt) (*mysql.Result, error) {

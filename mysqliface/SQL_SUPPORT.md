@@ -11,6 +11,9 @@ The MySQL wire protocol interface aims to feel familiar to SQL users. The table 
 | `REPLACE` | `REPLACE INTO people VALUES ('{"id":"123","name":"Alice"}')` | Supported |
 | `UPSERT`  | `INSERT INTO people VALUES ('{"id":"123"}') ON DUPLICATE KEY UPDATE name = 'Alice'` | Supported |
 | `SHOW COLLECTIONS` | `SHOW COLLECTIONS` | Supported |
+| `SHOW DATABASES` | `SHOW DATABASES` | Supported |
+| `SHOW CREATE TABLE` | `SHOW CREATE TABLE people` | Supported |
+| `SHOW VARIABLES` | `SHOW VARIABLES LIKE 'sql_mode'` | Supported |
 | `CREATE COLLECTION` | `CREATE COLLECTION people` | Supported |
 | `DROP COLLECTION` | `DROP COLLECTION people` | Supported |
 

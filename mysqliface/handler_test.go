@@ -154,6 +154,51 @@ func TestHandlerInsertAndSelect(t *testing.T) {
 	}
 }
 
+func TestHandlerReplace(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	res, err := h.HandleQuery(`REPLACE INTO people VALUES ('{"id":"1","name":"John"}')`)
+	if err != nil {
+		t.Fatalf("unexpected replace error: %v", err)
+	}
+	if res.AffectedRows != 1 {
+		t.Fatalf("expected 1 affected row on initial replace, got %d", res.AffectedRows)
+	}
+
+	res, err = h.HandleQuery(`REPLACE INTO people VALUES ('{"id":"1","name":"Jane"}')`)
+	if err != nil {
+		t.Fatalf("unexpected replace error: %v", err)
+	}
+	if res.AffectedRows != 2 {
+		t.Fatalf("expected 2 affected rows when replacing existing document, got %d", res.AffectedRows)
+	}
+
+	res, err = h.HandleQuery(`REPLACE INTO people SET id='1', name='Alice'`)
+	if err != nil {
+		t.Fatalf("unexpected replace error with set syntax: %v", err)
+	}
+	if res.AffectedRows != 2 {
+		t.Fatalf("expected 2 affected rows when replacing using set syntax, got %d", res.AffectedRows)
+	}
+
+	selectRes, err := h.HandleQuery(`SELECT name FROM people WHERE id = '1'`)
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	t.Cleanup(selectRes.Close)
+
+	_, rows := parseResultRows(t, selectRes)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row after replace, got %d", len(rows))
+	}
+	if got := rows[0]["name"]; got != "Alice" {
+		t.Fatalf("expected name 'Alice' after replace, got %q", got)
+	}
+}
+
 func TestHandlerUpdate(t *testing.T) {
 	svc := newMockService(t)
 	t.Cleanup(svc.Close)

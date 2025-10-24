@@ -132,7 +132,7 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
 		}
 		return h.handleDropCollection(stmt)
-	case tokens[0] == "INSERT":
+	case tokens[0] == "INSERT" || tokens[0] == "REPLACE":
 		stmt, err := h.parseInsertStmt(q)
 		if err != nil {
 			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
@@ -445,6 +445,14 @@ func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
 
 	var affected uint64
 	for _, doc := range docs {
+		if stmt.IsReplace {
+			removed, err := removeExistingDocuments(col, doc)
+			if err != nil {
+				return nil, err
+			}
+			affected += removed
+		}
+
 		if _, err := col.Insert(doc); err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "conflict") {
 				return nil, mysql.NewError(mysql.ER_DUP_ENTRY, err.Error())
@@ -455,6 +463,132 @@ func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
 	}
 
 	return &mysql.Result{AffectedRows: affected}, nil
+}
+
+func removeExistingDocuments(col *collection.Collection, doc map[string]any) (uint64, error) {
+	key, value, ok := findDocumentIdentifier(doc)
+	if !ok {
+		return 0, nil
+	}
+
+	rows, err := findRowsByFieldValue(col, key, value)
+	if err != nil {
+		return 0, err
+	}
+
+	var removed uint64
+	for _, row := range rows {
+		if err := col.Remove(row); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+
+	return removed, nil
+}
+
+func findDocumentIdentifier(doc map[string]any) (string, any, bool) {
+	if value, ok := doc["id"]; ok {
+		return "id", value, true
+	}
+
+	for key, value := range doc {
+		if strings.EqualFold(key, "id") {
+			return key, value, true
+		}
+	}
+
+	return "", nil, false
+}
+
+func findRowsByFieldValue(col *collection.Collection, field string, value any) ([]*collection.Row, error) {
+	target, ok := comparableValue(value)
+	if !ok {
+		return nil, nil
+	}
+
+	fieldLower := strings.ToLower(field)
+	rows := make([]*collection.Row, 0)
+	var traverseErr error
+
+	col.TraverseRange(0, 0, func(row *collection.Row) {
+		if traverseErr != nil {
+			return
+		}
+
+		raw, err := documentRawMap(row.Payload)
+		if err != nil {
+			traverseErr = err
+			return
+		}
+
+		for key, rawValue := range raw {
+			if strings.ToLower(key) != fieldLower {
+				continue
+			}
+
+			var decoded interface{}
+			if err := json.Unmarshal(rawValue, &decoded); err != nil {
+				traverseErr = err
+				return
+			}
+
+			current, ok := comparableValue(decoded)
+			if !ok {
+				continue
+			}
+
+			if current == target {
+				rows = append(rows, row)
+				return
+			}
+		}
+	})
+
+	if traverseErr != nil {
+		return nil, traverseErr
+	}
+
+	return rows, nil
+}
+
+func comparableValue(v any) (string, bool) {
+	switch t := v.(type) {
+	case nil:
+		return "<nil>", true
+	case string:
+		return t, true
+	case bool:
+		return strconv.FormatBool(t), true
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64), true
+	case float32:
+		return strconv.FormatFloat(float64(t), 'g', -1, 32), true
+	case int:
+		return strconv.FormatInt(int64(t), 10), true
+	case int8:
+		return strconv.FormatInt(int64(t), 10), true
+	case int16:
+		return strconv.FormatInt(int64(t), 10), true
+	case int32:
+		return strconv.FormatInt(int64(t), 10), true
+	case int64:
+		return strconv.FormatInt(t, 10), true
+	case uint:
+		return strconv.FormatUint(uint64(t), 10), true
+	case uint8:
+		return strconv.FormatUint(uint64(t), 10), true
+	case uint16:
+		return strconv.FormatUint(uint64(t), 10), true
+	case uint32:
+		return strconv.FormatUint(uint64(t), 10), true
+	case uint64:
+		return strconv.FormatUint(t, 10), true
+	case json.Number:
+		return t.String(), true
+	default:
+		return "", false
+	}
 }
 
 func (h *handler) handleDelete(stmt *ast.DeleteStmt) (*mysql.Result, error) {

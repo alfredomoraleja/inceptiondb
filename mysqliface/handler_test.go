@@ -386,6 +386,83 @@ func TestHandlerSelectProjection(t *testing.T) {
 	res.Close()
 }
 
+func TestHandlerDeleteRemovesDocuments(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	docs := []string{
+		`{"id":"1","name":"John"}`,
+		`{"id":"2","name":"Alice"}`,
+	}
+
+	for _, doc := range docs {
+		if _, err := h.HandleQuery("INSERT INTO people VALUES ('" + doc + "')"); err != nil {
+			t.Fatalf("unexpected insert error: %v", err)
+		}
+	}
+
+	res, err := h.HandleQuery("DELETE FROM people WHERE id = '1'")
+	if err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
+	}
+	if res.AffectedRows != 1 {
+		t.Fatalf("expected to delete 1 row, got %d", res.AffectedRows)
+	}
+
+	selectRes, err := h.HandleQuery("SELECT name FROM people")
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	t.Cleanup(selectRes.Close)
+
+	_, rows := parseResultRows(t, selectRes)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 remaining row, got %d", len(rows))
+	}
+	if got := rows[0]["name"]; got != "Alice" {
+		t.Fatalf("expected remaining document to be 'Alice', got %q", got)
+	}
+}
+
+func TestHandlerDeleteAllDocuments(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	docs := []string{
+		`{"id":"1","name":"John"}`,
+		`{"id":"2","name":"Alice"}`,
+	}
+
+	for _, doc := range docs {
+		if _, err := h.HandleQuery("INSERT INTO people VALUES ('" + doc + "')"); err != nil {
+			t.Fatalf("unexpected insert error: %v", err)
+		}
+	}
+
+	res, err := h.HandleQuery("DELETE FROM people")
+	if err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
+	}
+	if res.AffectedRows != uint64(len(docs)) {
+		t.Fatalf("expected to delete %d rows, got %d", len(docs), res.AffectedRows)
+	}
+
+	selectRes, err := h.HandleQuery("SELECT * FROM people")
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	t.Cleanup(selectRes.Close)
+
+	_, rows := parseResultRows(t, selectRes)
+	if len(rows) != 0 {
+		t.Fatalf("expected 0 rows after delete, got %d", len(rows))
+	}
+}
+
 func containsColumn(columns []string, target string) bool {
 	for _, column := range columns {
 		if column == target {

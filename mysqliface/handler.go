@@ -88,6 +88,11 @@ type informationSchemaColumn struct {
 	key  string
 }
 
+type projectionColumn struct {
+	name string
+	path []string
+}
+
 func NewHandler(s service.Servicer, version string) *handler {
 	return &handler{svc: s, version: version, parser: parser.New()}
 }
@@ -581,8 +586,8 @@ func (h *handler) handleSelectWithoutFrom(stmt *ast.SelectStmt) (*mysql.Result, 
 }
 
 func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*mysql.Result, error) {
-	if stmt.Fields == nil || len(stmt.Fields.Fields) != 1 || stmt.Fields.Fields[0].WildCard == nil {
-		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only SELECT * is supported")
+	if stmt.Fields == nil || len(stmt.Fields.Fields) == 0 {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "no columns specified")
 	}
 	if stmt.GroupBy != nil || stmt.Having != nil || stmt.OrderBy != nil || len(stmt.TableHints) > 0 {
 		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported select clause")
@@ -609,6 +614,29 @@ func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*my
 		return nil, err
 	}
 
+	if len(stmt.Fields.Fields) == 1 && stmt.Fields.Fields[0].WildCard != nil {
+		return h.selectAllColumns(col, filter, limit, offset)
+	}
+
+	projections, err := buildProjectionColumns(stmt.Fields, name)
+	if err != nil {
+		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
+	}
+
+	rows, err := h.selectProjection(col, filter, limit, offset, projections)
+	if err != nil {
+		return nil, err
+	}
+
+	columnNames := make([]string, len(projections))
+	for i, projection := range projections {
+		columnNames[i] = projection.name
+	}
+
+	return buildSimpleResult(columnNames, rows)
+}
+
+func (h *handler) selectAllColumns(col *collection.Collection, filter documentFilter, limit, offset int) (*mysql.Result, error) {
 	rowMaps := make([]map[string]interface{}, 0)
 	columnsSet := make(map[string]struct{})
 	var traverseErr error
@@ -679,6 +707,116 @@ func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*my
 	}
 
 	return buildSimpleResult(columns, rows)
+}
+
+func (h *handler) selectProjection(col *collection.Collection, filter documentFilter, limit, offset int, projections []projectionColumn) ([][]interface{}, error) {
+	rows := make([][]interface{}, 0)
+	var traverseErr error
+	selected := 0
+	matched := 0
+
+	col.TraverseRange(0, 0, func(row *collection.Row) {
+		if traverseErr != nil {
+			return
+		}
+		if limit > 0 && selected >= limit {
+			return
+		}
+
+		rawDoc, err := documentRawMap(row.Payload)
+		if err != nil {
+			traverseErr = err
+			return
+		}
+
+		if filter != nil {
+			include, err := filter(rawDoc)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+			if !include {
+				return
+			}
+		}
+
+		if matched < offset {
+			matched++
+			return
+		}
+		matched++
+
+		rowValues := make([]interface{}, len(projections))
+		for i, projection := range projections {
+			value, ok, err := valueAtPath(rawDoc, projection.path)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+			if !ok {
+				rowValues[i] = nil
+				continue
+			}
+			formatted, err := normalizeProjectionValue(value)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+			rowValues[i] = formatted
+		}
+
+		rows = append(rows, rowValues)
+		selected++
+	})
+
+	if traverseErr != nil {
+		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, traverseErr.Error())
+	}
+
+	return rows, nil
+}
+
+func normalizeProjectionValue(value any) (any, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	switch v := value.(type) {
+	case map[string]interface{}, []interface{}:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		return string(data), nil
+	case string:
+		return v, nil
+	default:
+		return fmt.Sprint(v), nil
+	}
+}
+
+func buildProjectionColumns(fields *ast.FieldList, table string) ([]projectionColumn, error) {
+	projections := make([]projectionColumn, 0, len(fields.Fields))
+
+	for _, field := range fields.Fields {
+		if field.WildCard != nil {
+			return nil, fmt.Errorf("mixing wildcards with explicit columns is not supported")
+		}
+
+		path, err := columnPathFromExpr(field.Expr, table)
+		if err != nil {
+			return nil, err
+		}
+
+		name := field.AsName.O
+		if name == "" {
+			name = strings.Join(path, ".")
+		}
+
+		projections = append(projections, projectionColumn{name: name, path: path})
+	}
+
+	return projections, nil
 }
 
 func documentFirstLevelColumns(payload []byte) (map[string]interface{}, error) {

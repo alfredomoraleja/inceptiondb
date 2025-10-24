@@ -195,33 +195,13 @@ func assertSelectMapsFirstLevelColumns(t *testing.T, h *handler) {
 		t.Fatalf("expected 1 row, got %d", len(res.Resultset.RowDatas))
 	}
 
-	fields := res.Resultset.Fields
-	gotNames := make([]string, len(fields))
-	for i, field := range fields {
-		gotNames[i] = string(field.Name)
-	}
-
+	gotNames, rows := parseResultRows(t, res)
 	expectedNames := []string{"address", "age", "colors", "id", "name"}
 	if strings.Join(gotNames, ",") != strings.Join(expectedNames, ",") {
 		t.Fatalf("expected columns %v, got %v", expectedNames, gotNames)
 	}
 
-	values, err := res.Resultset.RowDatas[0].ParseText(fields, nil)
-	if err != nil {
-		t.Fatalf("parse row: %v", err)
-	}
-
-	gotValues := map[string]string{}
-	for i, name := range gotNames {
-		switch v := values[i].Value().(type) {
-		case nil:
-			gotValues[name] = ""
-		case []byte:
-			gotValues[name] = string(v)
-		default:
-			gotValues[name] = fmt.Sprint(v)
-		}
-	}
+	gotValues := rows[0]
 
 	if got := gotValues["name"]; got != "John" {
 		t.Fatalf("expected name 'John', got %q", got)
@@ -238,6 +218,100 @@ func assertSelectMapsFirstLevelColumns(t *testing.T, h *handler) {
 	if got := gotValues["id"]; got == "" {
 		t.Fatalf("expected generated id, got empty string")
 	}
+}
+
+func parseResultRows(t testing.TB, res *mysql.Result) ([]string, []map[string]string) {
+	t.Helper()
+
+	fields := res.Resultset.Fields
+	names := make([]string, len(fields))
+	for i, field := range fields {
+		names[i] = string(field.Name)
+	}
+
+	rows := make([]map[string]string, len(res.Resultset.RowDatas))
+	for i, rowData := range res.Resultset.RowDatas {
+		values, err := rowData.ParseText(fields, nil)
+		if err != nil {
+			t.Fatalf("parse row: %v", err)
+		}
+
+		row := make(map[string]string, len(names))
+		for j, name := range names {
+			switch v := values[j].Value().(type) {
+			case nil:
+				row[name] = ""
+			case []byte:
+				row[name] = string(v)
+			default:
+				row[name] = fmt.Sprint(v)
+			}
+		}
+		rows[i] = row
+	}
+
+	return names, rows
+}
+
+func TestHandlerSelectWhereFiltersRows(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	docs := []string{
+		`{"name":"John","age":33,"address":{"street":{"name":"Elm","number":5}}}`,
+		`{"name":"Alice","age":30,"address":{"street":{"name":"Pine","number":3}}}`,
+	}
+	for _, doc := range docs {
+		if _, err := h.HandleQuery("INSERT INTO people VALUES ('" + doc + "')"); err != nil {
+			t.Fatalf("unexpected insert error: %v", err)
+		}
+	}
+
+	res, err := h.HandleQuery("SELECT * FROM people WHERE age = 30")
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	columnNames, rows := parseResultRows(t, res)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if _, ok := rows[0]["id"]; !ok {
+		t.Fatalf("expected id column in result")
+	}
+	if got := rows[0]["name"]; got != "Alice" {
+		t.Fatalf("expected name 'Alice', got %q", got)
+	}
+	if got := rows[0]["age"]; got != "30" {
+		t.Fatalf("expected age '30', got %q", got)
+	}
+	res.Close()
+
+	res, err = h.HandleQuery("SELECT * FROM people WHERE address.street.number = 3")
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	_, rows = parseResultRows(t, res)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if got := rows[0]["name"]; got != "Alice" {
+		t.Fatalf("expected nested filter to return 'Alice', got %q", got)
+	}
+	if !containsColumn(columnNames, "address") {
+		t.Fatalf("expected address column in result")
+	}
+	res.Close()
+}
+
+func containsColumn(columns []string, target string) bool {
+	for _, column := range columns {
+		if column == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandlerSelectWithUnknownSchema(t *testing.T) {

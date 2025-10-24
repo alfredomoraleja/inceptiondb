@@ -584,13 +584,21 @@ func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*my
 	if stmt.Fields == nil || len(stmt.Fields.Fields) != 1 || stmt.Fields.Fields[0].WildCard == nil {
 		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "only SELECT * is supported")
 	}
-	if stmt.Where != nil || stmt.GroupBy != nil || stmt.Having != nil || stmt.OrderBy != nil || len(stmt.TableHints) > 0 {
+	if stmt.GroupBy != nil || stmt.Having != nil || stmt.OrderBy != nil || len(stmt.TableHints) > 0 {
 		return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, "unsupported select clause")
 	}
 
 	limit, offset, err := limitOffsetFromStmt(stmt)
 	if err != nil {
 		return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+	}
+
+	var filter documentFilter
+	if stmt.Where != nil {
+		filter, err = buildDocumentFilter(stmt.Where, name)
+		if err != nil {
+			return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
+		}
 	}
 
 	col, err := h.svc.GetCollection(name)
@@ -604,18 +612,41 @@ func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*my
 	rowMaps := make([]map[string]interface{}, 0)
 	columnsSet := make(map[string]struct{})
 	var traverseErr error
+	selected := 0
+	matched := 0
 
-	to := 0
-	if limit > 0 {
-		to = offset + limit
-	}
-
-	col.TraverseRange(offset, to, func(row *collection.Row) {
+	col.TraverseRange(0, 0, func(row *collection.Row) {
 		if traverseErr != nil {
 			return
 		}
+		if limit > 0 && selected >= limit {
+			return
+		}
 
-		mapped, err := documentFirstLevelColumns(row.Payload)
+		rawDoc, err := documentRawMap(row.Payload)
+		if err != nil {
+			traverseErr = err
+			return
+		}
+
+		if filter != nil {
+			include, err := filter(rawDoc)
+			if err != nil {
+				traverseErr = err
+				return
+			}
+			if !include {
+				return
+			}
+		}
+
+		if matched < offset {
+			matched++
+			return
+		}
+		matched++
+
+		mapped, err := documentFirstLevelColumnsFromRaw(rawDoc)
 		if err != nil {
 			traverseErr = err
 			return
@@ -625,6 +656,7 @@ func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*my
 		for key := range mapped {
 			columnsSet[key] = struct{}{}
 		}
+		selected++
 	})
 
 	if traverseErr != nil {
@@ -650,15 +682,26 @@ func (h *handler) handleCollectionSelect(stmt *ast.SelectStmt, name string) (*my
 }
 
 func documentFirstLevelColumns(payload []byte) (map[string]interface{}, error) {
+	raw, err := documentRawMap(payload)
+	if err != nil {
+		return nil, err
+	}
+	return documentFirstLevelColumnsFromRaw(raw)
+}
+
+func documentRawMap(payload []byte) (map[string]json.RawMessage, error) {
 	if len(payload) == 0 {
-		return map[string]interface{}{}, nil
+		return map[string]json.RawMessage{}, nil
 	}
 
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, fmt.Errorf("decode document: %w", err)
 	}
+	return raw, nil
+}
 
+func documentFirstLevelColumnsFromRaw(raw map[string]json.RawMessage) (map[string]interface{}, error) {
 	result := make(map[string]interface{}, len(raw))
 	for key, value := range raw {
 		if value == nil {
@@ -680,6 +723,207 @@ func documentFirstLevelColumns(payload []byte) (map[string]interface{}, error) {
 	}
 
 	return result, nil
+}
+
+type documentFilter func(map[string]json.RawMessage) (bool, error)
+
+func buildDocumentFilter(expr ast.ExprNode, table string) (documentFilter, error) {
+	switch x := expr.(type) {
+	case *ast.BinaryOperationExpr:
+		switch x.Op {
+		case opcode.LogicAnd:
+			left, err := buildDocumentFilter(x.L, table)
+			if err != nil {
+				return nil, err
+			}
+			right, err := buildDocumentFilter(x.R, table)
+			if err != nil {
+				return nil, err
+			}
+			return func(doc map[string]json.RawMessage) (bool, error) {
+				lval, err := left(doc)
+				if err != nil {
+					return false, err
+				}
+				if !lval {
+					return false, nil
+				}
+				return right(doc)
+			}, nil
+		case opcode.LogicOr:
+			left, err := buildDocumentFilter(x.L, table)
+			if err != nil {
+				return nil, err
+			}
+			right, err := buildDocumentFilter(x.R, table)
+			if err != nil {
+				return nil, err
+			}
+			return func(doc map[string]json.RawMessage) (bool, error) {
+				lval, err := left(doc)
+				if err != nil {
+					return false, err
+				}
+				if lval {
+					return true, nil
+				}
+				return right(doc)
+			}, nil
+		case opcode.EQ:
+			return buildEqualityFilter(x.L, x.R, table)
+		default:
+			return nil, fmt.Errorf("unsupported where clause")
+		}
+	case *ast.ParenthesesExpr:
+		return buildDocumentFilter(x.Expr, table)
+	default:
+		return nil, fmt.Errorf("unsupported where clause")
+	}
+}
+
+func buildEqualityFilter(left, right ast.ExprNode, table string) (documentFilter, error) {
+	path, value, err := columnEqualsValue(left, right, table)
+	if err != nil {
+		path, value, err = columnEqualsValue(right, left, table)
+		if err != nil {
+			return nil, fmt.Errorf("unsupported where clause")
+		}
+	}
+
+	normalized := normalizeFilterValue(value)
+
+	return func(doc map[string]json.RawMessage) (bool, error) {
+		val, ok, err := valueAtPath(doc, path)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+		return equalJSONValue(val, normalized), nil
+	}, nil
+}
+
+func columnEqualsValue(columnExpr, valueExpr ast.ExprNode, table string) ([]string, any, error) {
+	path, err := columnPathFromExpr(columnExpr, table)
+	if err != nil {
+		return nil, nil, err
+	}
+	value, err := valueExprToInterface(valueExpr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return path, value, nil
+}
+
+func columnPathFromExpr(expr ast.ExprNode, table string) ([]string, error) {
+	col, ok := expr.(*ast.ColumnNameExpr)
+	if !ok || col.Name == nil {
+		return nil, errUnsupportedExpression
+	}
+
+	parts := make([]string, 0, 3)
+	if schema := col.Name.Schema.O; schema != "" && !strings.EqualFold(schema, fakeDatabaseName) {
+		parts = append(parts, schema)
+	}
+	if tbl := col.Name.Table.O; tbl != "" && !strings.EqualFold(tbl, table) {
+		parts = append(parts, tbl)
+	}
+	if name := col.Name.Name.O; name != "" {
+		parts = append(parts, name)
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("invalid column reference")
+	}
+	return parts, nil
+}
+
+func valueAtPath(doc map[string]json.RawMessage, path []string) (any, bool, error) {
+	if len(path) == 0 {
+		return nil, false, nil
+	}
+
+	current := doc
+	for i, part := range path {
+		raw, ok := current[part]
+		if !ok {
+			return nil, false, nil
+		}
+		if i == len(path)-1 {
+			if raw == nil {
+				return nil, true, nil
+			}
+			var decoded any
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				return nil, false, fmt.Errorf("decode field %q: %w", part, err)
+			}
+			return decoded, true, nil
+		}
+		if raw == nil {
+			return nil, false, nil
+		}
+		next := make(map[string]json.RawMessage)
+		if err := json.Unmarshal(raw, &next); err != nil {
+			return nil, false, fmt.Errorf("decode field %q: %w", part, err)
+		}
+		current = next
+	}
+
+	return nil, false, nil
+}
+
+func normalizeFilterValue(value any) any {
+	switch v := value.(type) {
+	case int:
+		return float64(v)
+	case int8:
+		return float64(v)
+	case int16:
+		return float64(v)
+	case int32:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case uint:
+		return float64(v)
+	case uint8:
+		return float64(v)
+	case uint16:
+		return float64(v)
+	case uint32:
+		return float64(v)
+	case uint64:
+		return float64(v)
+	case float32:
+		return float64(v)
+	default:
+		return value
+	}
+}
+
+func equalJSONValue(docValue, filterValue any) bool {
+	switch fv := filterValue.(type) {
+	case nil:
+		return docValue == nil
+	case bool:
+		bv, ok := docValue.(bool)
+		return ok && bv == fv
+	case float64:
+		switch dv := docValue.(type) {
+		case float64:
+			return dv == fv
+		case int64:
+			return float64(dv) == fv
+		case uint64:
+			return float64(dv) == fv
+		}
+		return false
+	case string:
+		sv, ok := docValue.(string)
+		return ok && sv == fv
+	default:
+		return fmt.Sprint(docValue) == fmt.Sprint(filterValue)
+	}
 }
 
 func replaceFirstKeyword(query, keyword, replacement string) string {

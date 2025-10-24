@@ -154,6 +154,39 @@ func TestHandlerInsertAndSelect(t *testing.T) {
 	}
 }
 
+func TestHandlerUpdate(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+
+	if _, err := h.HandleQuery(`INSERT INTO people VALUES ('{"id":"1","name":"John"}')`); err != nil {
+		t.Fatalf("unexpected insert error: %v", err)
+	}
+
+	res, err := h.HandleQuery(`UPDATE people SET name='Jane' WHERE id = '1'`)
+	if err != nil {
+		t.Fatalf("unexpected update error: %v", err)
+	}
+	if res.AffectedRows != 1 {
+		t.Fatalf("expected 1 affected row, got %d", res.AffectedRows)
+	}
+
+	selectRes, err := h.HandleQuery("SELECT name FROM people WHERE id = '1'")
+	if err != nil {
+		t.Fatalf("unexpected select error: %v", err)
+	}
+	t.Cleanup(selectRes.Close)
+
+	_, rows := parseResultRows(t, selectRes)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if got := rows[0]["name"]; got != "Jane" {
+		t.Fatalf("expected updated name 'Jane', got %q", got)
+	}
+}
+
 func TestHandlerSelectMapsFirstLevelColumns(t *testing.T) {
 	svc := newMockService(t)
 	t.Cleanup(svc.Close)

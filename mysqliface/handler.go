@@ -443,6 +443,18 @@ func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
 		return nil, err
 	}
 
+	var onDuplicatePatch map[string]any
+	if len(stmt.OnDuplicate) > 0 {
+		patch, err := buildUpdatePatch(stmt.OnDuplicate, name)
+		if err != nil {
+			if errors.Is(err, errUnsupportedExpression) {
+				return nil, mysql.NewError(mysql.ER_NOT_SUPPORTED_YET, err.Error())
+			}
+			return nil, mysql.NewError(mysql.ER_PARSE_ERROR, err.Error())
+		}
+		onDuplicatePatch = patch
+	}
+
 	var affected uint64
 	for _, doc := range docs {
 		if stmt.IsReplace {
@@ -453,8 +465,30 @@ func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
 			affected += removed
 		}
 
+		if len(stmt.OnDuplicate) > 0 {
+			handled, updated, err := applyInsertOnDuplicate(col, doc, onDuplicatePatch)
+			if err != nil {
+				return nil, err
+			}
+			if handled {
+				affected += updated
+				continue
+			}
+		}
+
 		if _, err := col.Insert(doc); err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "conflict") {
+			if len(stmt.OnDuplicate) > 0 && isDuplicateKeyError(err) {
+				handled, updated, upsertErr := applyInsertOnDuplicate(col, doc, onDuplicatePatch)
+				if upsertErr != nil {
+					return nil, upsertErr
+				}
+				if handled {
+					affected += updated
+					continue
+				}
+				return nil, mysql.NewError(mysql.ER_DUP_ENTRY, err.Error())
+			}
+			if isDuplicateKeyError(err) {
 				return nil, mysql.NewError(mysql.ER_DUP_ENTRY, err.Error())
 			}
 			return nil, err
@@ -463,6 +497,50 @@ func (h *handler) handleInsert(stmt *ast.InsertStmt) (*mysql.Result, error) {
 	}
 
 	return &mysql.Result{AffectedRows: affected}, nil
+}
+
+func applyInsertOnDuplicate(col *collection.Collection, doc map[string]any, patch map[string]any) (bool, uint64, error) {
+	if len(patch) == 0 {
+		return false, 0, nil
+	}
+
+	key, value, ok := findDocumentIdentifier(doc)
+	if !ok {
+		return false, 0, nil
+	}
+
+	rows, err := findRowsByFieldValue(col, key, value)
+	if err != nil {
+		return false, 0, err
+	}
+	if len(rows) == 0 {
+		return false, 0, nil
+	}
+
+	var affected uint64
+	for _, row := range rows {
+		row.PatchMutex.Lock()
+		original := append([]byte(nil), row.Payload...)
+		err := col.Patch(row, patch)
+		updated := !bytes.Equal(original, row.Payload)
+		row.PatchMutex.Unlock()
+		if err != nil {
+			return false, affected, err
+		}
+		if updated {
+			affected++
+		}
+	}
+
+	return true, affected, nil
+}
+
+func isDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "conflict") || strings.Contains(lower, "duplicate") || strings.Contains(lower, "already exists")
 }
 
 func removeExistingDocuments(col *collection.Collection, doc map[string]any) (uint64, error) {

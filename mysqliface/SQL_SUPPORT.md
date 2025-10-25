@@ -14,6 +14,9 @@ The MySQL wire protocol interface aims to feel familiar to SQL users. The table 
 | `SHOW DATABASES` | `SHOW DATABASES` | Supported |
 | `SHOW CREATE TABLE` | `SHOW CREATE TABLE people` | Supported |
 | `SHOW VARIABLES` | `SHOW VARIABLES LIKE 'sql_mode'` | Supported |
+| `SHOW WARNINGS` | `SHOW WARNINGS` | Supported |
+| `SHOW STATUS` | `SHOW STATUS LIKE 'Threads_connected'` | Supported |
+| `SHOW ENGINES` | `SHOW ENGINES` | Supported |
 | `CREATE COLLECTION` | `CREATE COLLECTION people` | Supported |
 | `DROP COLLECTION` | `DROP COLLECTION people` | Supported |
 

@@ -681,6 +681,45 @@ func TestShowTablesUsesFakeDatabaseName(t *testing.T) {
 	}
 }
 
+func TestShowEngines(t *testing.T) {
+	svc := newMockService(t)
+	t.Cleanup(svc.Close)
+
+	h := NewHandler(svc, "v-test")
+	res, err := h.HandleQuery("SHOW ENGINES")
+	if err != nil {
+		t.Fatalf("show engines error: %v", err)
+	}
+	defer res.Close()
+
+	if got := len(res.Resultset.Fields); got != 6 {
+		t.Fatalf("expected 6 columns, got %d", got)
+	}
+
+	expectedNames := []string{"Engine", "Support", "Comment", "Transactions", "XA", "Savepoints"}
+	for i, name := range expectedNames {
+		if got := string(res.Resultset.Fields[i].Name); got != name {
+			t.Fatalf("expected column %d name %q, got %q", i, name, got)
+		}
+	}
+
+	if len(res.Resultset.RowDatas) != 1 {
+		t.Fatalf("expected 1 engine row, got %d", len(res.Resultset.RowDatas))
+	}
+
+	row, err := res.Resultset.RowDatas[0].ParseText(res.Resultset.Fields, nil)
+	if err != nil {
+		t.Fatalf("parse row: %v", err)
+	}
+
+	if got := string(row[0].AsString()); got != "InnoDB" {
+		t.Fatalf("expected engine InnoDB, got %q", got)
+	}
+	if got := string(row[1].AsString()); got != "DEFAULT" {
+		t.Fatalf("expected support DEFAULT, got %q", got)
+	}
+}
+
 func TestShowCreateCollection(t *testing.T) {
 	svc := newMockService(t)
 	t.Cleanup(svc.Close)

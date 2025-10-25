@@ -170,6 +170,8 @@ func (h *handler) HandleQuery(query string) (*mysql.Result, error) {
 		return buildSimpleResult([]string{"Level", "Code", "Message"}, nil)
 	case len(tokens) >= 2 && tokens[0] == "SHOW" && tokens[1] == "STATUS":
 		return buildSimpleResult([]string{"Variable_name", "Value"}, nil)
+	case len(tokens) >= 2 && tokens[0] == "SHOW" && tokens[1] == "ENGINES":
+		return h.handleShowEngines()
 	case len(tokens) >= 3 && tokens[0] == "SHOW" && ((tokens[1] == "CHARACTER" && tokens[2] == "SET") || tokens[1] == "COLLATION"):
 		return buildSimpleResult([]string{"Charset", "Description", "Default collation", "Maxlen"}, nil)
 	case tokens[0] == "DESCRIBE" || tokens[0] == "EXPLAIN":
@@ -1931,6 +1933,14 @@ func (h *handler) handleShowVariables(query string) (*mysql.Result, error) {
 		return buildSimpleResult([]string{"Variable_name", "Value"}, [][]interface{}{{"autocommit", "ON"}})
 	}
 	return buildSimpleResult([]string{"Variable_name", "Value"}, nil)
+}
+
+func (h *handler) handleShowEngines() (*mysql.Result, error) {
+	columns := []string{"Engine", "Support", "Comment", "Transactions", "XA", "Savepoints"}
+	values := [][]interface{}{
+		{"InnoDB", "DEFAULT", "Supports transactions, row-level locking, and foreign keys", "YES", "YES", "YES"},
+	}
+	return buildSimpleResult(columns, values)
 }
 
 func informationSchemaTableRow(name string) map[string]interface{} {

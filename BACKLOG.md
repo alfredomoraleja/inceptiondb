@@ -8,6 +8,8 @@
 * Index management in UI
 * BUGFIX: when document is modified to remove field from non-sparse index, it should NOT remove the field!!!
 * ~~BTree index~~
+* Support invalidating journal entries during delete and patch operations so rebuilds can skip invalidated records
+* Create automatic snapshot inserts after every N patches to cap startup replay costs
 
 ## Should have
 
@@ -35,6 +37,7 @@
 * Ensure thread safety and improve performance with Map from standard library
 * ~~Insert multiple documents per request~~
 * Return http.StatusServiceUnavailable while loading collections
+* Support insert-only collections to reduce overhead from excessive patches
 
 ## Won't have
 

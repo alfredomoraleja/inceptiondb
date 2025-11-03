@@ -111,30 +111,42 @@
 				<p class="text-[11px] uppercase tracking-wide text-slate-500">Request body</p>
 				<pre class="max-h-48 overflow-y-auto rounded bg-slate-900 px-3 py-2 text-xs text-slate-200 font-mono whitespace-pre-wrap break-words">{{ activityRequestBody(selectedActivityEntry) }}</pre>
 			</div>
-			<div v-if="activityRequestTabEntries.length > 0" class="space-y-2">
-				<p v-if="false" class="text-[11px] uppercase tracking-wide text-slate-500">Request formats</p>
-				<div class="overflow-hidden rounded-lg border border-slate-800 bg-slate-950/60">
-					<div class="flex items-center gap-1 border-b border-slate-800 px-2 py-1">
-						<button
-										v-for="tab in activityRequestTabEntries"
-										:key="tab.id"
-										type="button"
-										class="rounded-md px-3 py-1.5 text-xs font-medium transition"
-										:class="selectedActivityRequestTab === tab.id
+                        <div v-if="activityRequestTabEntries.length > 0" class="space-y-2">
+                                <p v-if="false" class="text-[11px] uppercase tracking-wide text-slate-500">Request formats</p>
+                                <div class="overflow-hidden rounded-lg border border-slate-800 bg-slate-950/60">
+                                        <div class="flex items-center justify-between gap-2 border-b border-slate-800 px-2 py-1">
+                                                <div class="flex items-center gap-1">
+                                                        <button
+                                                                                v-for="tab in activityRequestTabEntries"
+                                                                                :key="tab.id"
+                                                                                type="button"
+                                                                                class="rounded-md px-3 py-1.5 text-xs font-medium transition"
+                                                                                :class="selectedActivityRequestTab === tab.id
                                                                 ? 'bg-slate-900 text-sky-300 border border-slate-700'
                                                                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'"
-										@click="selectedActivityRequestTab = tab.id"
-						>
-							{{ tab.label }}
-						</button>
-					</div>
-					<pre
-									v-if="activeActivityRequestTabContent"
-									style="height: 300px;"
-									class="max-h-48 overflow-y-auto bg-slate-900 px-3 py-2 text-xs text-slate-200 font-mono whitespace-pre-wrap break-words"
-					>{{ activeActivityRequestTabContent }}</pre>
-				</div>
-			</div>
+                                                                                @click="selectedActivityRequestTab = tab.id"
+                                                        >
+                                                                {{ tab.label }}
+                                                        </button>
+                                                </div>
+                                                <button
+                                                                                type="button"
+                                                                                class="inline-flex items-center gap-2 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                                                                                :disabled="!activeActivityRequestTabContent"
+                                                                                @click="copyActiveActivityRequest"
+                                                >
+                                                        <span v-if="copyActivityRequestState === 'copied'">Copied!</span>
+                                                        <span v-else-if="copyActivityRequestState === 'error'">Copy failed</span>
+                                                        <span v-else>Copy</span>
+                                                </button>
+                                        </div>
+                                        <pre
+                                                                        v-if="activeActivityRequestTabContent"
+                                                                        style="height: 300px;"
+                                                                        class="max-h-48 overflow-y-auto bg-slate-900 px-3 py-2 text-xs text-slate-200 font-mono whitespace-pre-wrap break-words"
+                                        >{{ activeActivityRequestTabContent }}</pre>
+                                </div>
+                        </div>
 			<div class="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
 				<span v-if="false">Started {{ formatActivityTime(selectedActivityEntry.startedAt) }}</span>
 				<span v-if="selectedActivityEntry.durationMs !== null">Duration {{ formatDuration(selectedActivityEntry.durationMs) }}</span>
@@ -1384,7 +1396,18 @@
 			const activityModal = ref(null);
 			const modalMode = ref('welcome');
 			const modalOpen = ref(false);
-			const selectedActivityRequestTab = ref('http');
+                        const activityRequestTabStorageKey = 'inceptiondb.activityRequestPreferredTab';
+                        const readStoredActivityRequestTab = () => {
+                                try {
+                                        return localStorage.getItem(activityRequestTabStorageKey) || 'http';
+                                } catch (error) {
+                                        return 'http';
+                                }
+                        };
+
+                        const selectedActivityRequestTab = ref(readStoredActivityRequestTab());
+                        let copyActivityRequestResetTimeout = null;
+                        const copyActivityRequestState = ref('idle');
 			const exportState = reactive({
 				running: false,
 				progress: '',
@@ -2453,22 +2476,65 @@
 								.filter(Boolean);
 			});
 
-			const activeActivityRequestTabContent = computed(() => {
-				const tabs = activityRequestTabEntries.value;
-				if (!tabs.length) return '';
-				const active = tabs.find((tab) => tab.id === selectedActivityRequestTab.value);
-				return active ? active.content : tabs[0].content;
-			});
+                        const activeActivityRequestTabContent = computed(() => {
+                                const tabs = activityRequestTabEntries.value;
+                                if (!tabs.length) return '';
+                                const active = tabs.find((tab) => tab.id === selectedActivityRequestTab.value);
+                                return active ? active.content : tabs[0].content;
+                        });
 
-			watch(activityRequestTabEntries, (tabs) => {
-				if (!Array.isArray(tabs) || tabs.length === 0) {
-					selectedActivityRequestTab.value = '';
-					return;
-				}
-				if (!tabs.some((tab) => tab.id === selectedActivityRequestTab.value)) {
-					selectedActivityRequestTab.value = tabs[0].id;
-				}
-			});
+                        const copyActiveActivityRequest = async () => {
+                                const content = activeActivityRequestTabContent.value;
+                                if (!content) return;
+
+                                if (copyActivityRequestResetTimeout !== null) {
+                                        window.clearTimeout(copyActivityRequestResetTimeout);
+                                        copyActivityRequestResetTimeout = null;
+                                }
+
+                                try {
+                                        await navigator.clipboard.writeText(content);
+                                        copyActivityRequestState.value = 'copied';
+                                } catch (error) {
+                                        copyActivityRequestState.value = 'error';
+                                }
+
+                                copyActivityRequestResetTimeout = window.setTimeout(() => {
+                                        copyActivityRequestState.value = 'idle';
+                                        copyActivityRequestResetTimeout = null;
+                                }, 2000);
+                        };
+
+                        watch(activityRequestTabEntries, (tabs) => {
+                                if (!Array.isArray(tabs) || tabs.length === 0) {
+                                        return;
+                                }
+                                if (!tabs.some((tab) => tab.id === selectedActivityRequestTab.value)) {
+                                        const storedTab = readStoredActivityRequestTab();
+                                        if (storedTab && tabs.some((tab) => tab.id === storedTab)) {
+                                                selectedActivityRequestTab.value = storedTab;
+                                        } else {
+                                                selectedActivityRequestTab.value = tabs[0].id;
+                                        }
+                                }
+                        });
+
+                        watch(selectedActivityRequestTab, (tab) => {
+                                if (!tab) return;
+                                try {
+                                        localStorage.setItem(activityRequestTabStorageKey, tab);
+                                } catch (error) {
+                                        // Ignore storage errors
+                                }
+                        });
+
+                        watch(activeActivityRequestTabContent, () => {
+                                copyActivityRequestState.value = 'idle';
+                                if (copyActivityRequestResetTimeout !== null) {
+                                        window.clearTimeout(copyActivityRequestResetTimeout);
+                                        copyActivityRequestResetTimeout = null;
+                                }
+                        });
 
 			const showActivityModal = () => {
 				const modalEl = activityModal.value;
@@ -4257,12 +4323,14 @@
 				activityMarkerTitle,
 				activityRequestHeaders,
 				activityRequestBody,
-				activityRequestTabEntries,
-				selectedActivityRequestTab,
-				activeActivityRequestTabContent,
-				buildCurlCommand,
-				activityModal,
-				modalMode,
+                                activityRequestTabEntries,
+                                selectedActivityRequestTab,
+                                activeActivityRequestTabContent,
+                                copyActivityRequestState,
+                                copyActiveActivityRequest,
+                                buildCurlCommand,
+                                activityModal,
+                                modalMode,
 				openActivityDetail,
 				closeActivityDetail,
 				closeActivityModal,

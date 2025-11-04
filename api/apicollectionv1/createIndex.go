@@ -21,6 +21,10 @@ type CreateIndexRequest struct {
 
 func createIndex(ctx context.Context, r *http.Request) (*listIndexesItem, error) {
 
+	if forwarded, err := forwardWrite(ctx, box.GetResponse(ctx), r); forwarded {
+		return nil, err
+	}
+
 	requestBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, err

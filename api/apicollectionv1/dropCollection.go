@@ -9,6 +9,10 @@ import (
 
 func dropCollection(ctx context.Context, w http.ResponseWriter) error {
 
+	if forwarded, err := forwardWrite(ctx, w, nil); forwarded {
+		return err
+	}
+
 	s := GetServicer(ctx)
 
 	collectionName := box.GetUrlParameter(ctx, "collectionName")

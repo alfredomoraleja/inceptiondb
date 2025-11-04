@@ -8,20 +8,30 @@ import (
 	"github.com/fulldump/box/boxopenapi"
 
 	"github.com/fulldump/inceptiondb/api/apicollectionv1"
+	"github.com/fulldump/inceptiondb/api/apireplicationv1"
+	"github.com/fulldump/inceptiondb/database"
+	"github.com/fulldump/inceptiondb/replication"
 	"github.com/fulldump/inceptiondb/service"
 	"github.com/fulldump/inceptiondb/statics"
 )
 
-func Build(s service.Servicer, staticsDir, version string) *box.B { // TODO: remove datadir
+func Build(s service.Servicer, staticsDir, version string, db *database.Database, manager *replication.Manager, forwarder apicollectionv1.Forwarder) *box.B { // TODO: remove datadir
 
 	b := box.NewBox()
 
 	v1 := b.Resource("/v1")
 	v1.WithInterceptors(box.SetResponseHeader("Content-Type", "application/json"))
 
-	apicollectionv1.BuildV1Collection(v1, s).
+	collectionResource := apicollectionv1.BuildV1Collection(v1, s)
+	interceptors := []box.I{injectServicer(s)}
+	if forwarder != nil {
+		interceptors = append(interceptors, injectForwarder(forwarder))
+	}
+	collectionResource.WithInterceptors(interceptors...)
+
+	apireplicationv1.Build(v1).
 		WithInterceptors(
-			injectServicer(s),
+			injectReplication(db, manager),
 		)
 
 	b.Resource("/v1/*").
@@ -71,6 +81,24 @@ func injectServicer(s service.Servicer) box.I {
 	return func(next box.H) box.H {
 		return func(ctx context.Context) {
 			next(apicollectionv1.SetServicer(ctx, s))
+		}
+	}
+}
+
+func injectForwarder(f apicollectionv1.Forwarder) box.I {
+	return func(next box.H) box.H {
+		return func(ctx context.Context) {
+			next(apicollectionv1.SetForwarder(ctx, f))
+		}
+	}
+}
+
+func injectReplication(db *database.Database, manager *replication.Manager) box.I {
+	return func(next box.H) box.H {
+		return func(ctx context.Context) {
+			ctx = apireplicationv1.SetDatabase(ctx, db)
+			ctx = apireplicationv1.SetManager(ctx, manager)
+			next(ctx)
 		}
 	}
 }

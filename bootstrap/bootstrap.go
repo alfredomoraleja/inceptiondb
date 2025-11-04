@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"github.com/fulldump/inceptiondb/api"
 	"github.com/fulldump/inceptiondb/configuration"
 	"github.com/fulldump/inceptiondb/database"
+	"github.com/fulldump/inceptiondb/mongo"
 	"github.com/fulldump/inceptiondb/service"
 )
 
@@ -28,7 +30,9 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 		Dir: c.Dir,
 	})
 
-	b := api.Build(service.NewService(db), c.Statics, VERSION)
+	srv := service.NewService(db)
+
+	b := api.Build(srv, c.Statics, VERSION)
 	if c.EnableCompression {
 		b.WithInterceptors(api.Compression)
 	}
@@ -58,9 +62,24 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 	}
 	log.Println("listening on", c.HttpAddr)
 
+	var mongoServer *mongo.Server
+	var mongoListener net.Listener
+	if c.MongoAddr != "" {
+		mongoServer = mongo.NewServer(srv)
+		mongoListener, err = net.Listen("tcp", c.MongoAddr)
+		if err != nil {
+			log.Println("ERROR:", err.Error())
+			os.Exit(-1)
+		}
+		log.Println("mongo wire listening on", c.MongoAddr)
+	}
+
 	stop = func() {
 		db.Stop()
 		s.Shutdown(context.Background())
+		if mongoServer != nil {
+			mongoServer.Close()
+		}
 	}
 
 	signalChan := make(chan os.Signal, 1)
@@ -99,6 +118,16 @@ func Bootstrap(c *configuration.Configuration) (start, stop func()) {
 				fmt.Println(err.Error())
 			}
 		}()
+
+		if mongoServer != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := mongoServer.Serve(mongoListener); err != nil && !errors.Is(err, net.ErrClosed) {
+					fmt.Println(err.Error())
+				}
+			}()
+		}
 
 		wg.Wait()
 	}

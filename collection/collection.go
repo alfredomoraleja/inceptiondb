@@ -27,7 +27,9 @@ type Collection struct {
 	rowsMutex    *sync.Mutex
 	Indexes      map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
 	buffer       *bufio.Writer               // TODO: use write buffer to improve performance (x3 in tests)
+	indexEntries []*collectionIndexEntry
 	Defaults     map[string]any
+	defaultItems []defaultEntry
 	Count        int64
 	encoderMutex *sync.Mutex
 }
@@ -36,6 +38,26 @@ type collectionIndex struct {
 	Index
 	Type    string
 	Options interface{}
+}
+
+type collectionIndexEntry struct {
+	name  string
+	index *collectionIndex
+}
+
+type defaultEntryKind uint8
+
+const (
+	defaultEntryStatic defaultEntryKind = iota
+	defaultEntryUUID
+	defaultEntryUnixNano
+	defaultEntryAuto
+)
+
+type defaultEntry struct {
+	key   string
+	kind  defaultEntryKind
+	value any
 }
 
 type Row struct {
@@ -84,6 +106,7 @@ func OpenCollection(filename string) (*Collection, error) {
 		rowsMutex:    &sync.Mutex{},
 		Filename:     filename,
 		Indexes:      map[string]*collectionIndex{},
+		indexEntries: []*collectionIndexEntry{},
 		encoderMutex: &sync.Mutex{},
 	}
 
@@ -154,12 +177,19 @@ func OpenCollection(filename string) (*Collection, error) {
 			}
 		case "patch":
 			params := struct {
-				I    int
-				Diff map[string]interface{}
+				I    int             `json:"i"`
+				Diff json.RawMessage `json:"diff"`
 			}{}
 			json.Unmarshal(command.Payload, &params)
 			row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
-			err := collection.patchByRow(row, params.Diff, false)
+			var diff interface{}
+			if len(params.Diff) > 0 {
+				diff, err = decodeMergeDiffRaw(params.Diff)
+				if err != nil {
+					return nil, fmt.Errorf("decode patch diff: %w", err)
+				}
+			}
+			err := collection.patchByRow(row, diff, false)
 			if err != nil {
 				fmt.Printf("WARNING: patch item %d: %s\n", params.I, err.Error())
 			}
@@ -188,7 +218,7 @@ func (c *Collection) addRow(payload json.RawMessage) (*Row, error) {
 		Payload: payload,
 	}
 
-	err := indexInsert(c.Indexes, row)
+	err := indexInsert(c.indexEntries, row)
 	if err != nil {
 		return nil, err
 	}
@@ -209,29 +239,24 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 
 	auto := atomic.AddInt64(&c.Count, 1)
 
-	if c.Defaults != nil {
-		// item := map[string]any{} // todo: item is shadowed, choose a better name
-		// err := json.Unmarshal(payload, &item)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("json encode defaults: %w", err)
-		// }
-
-		for k, v := range c.Defaults {
-			if item[k] != nil {
+	if len(c.defaultItems) > 0 {
+		for i := range c.defaultItems {
+			entry := &c.defaultItems[i]
+			if item[entry.key] != nil {
 				continue
 			}
 			var value any
-			switch v {
-			case "uuid()":
+			switch entry.kind {
+			case defaultEntryUUID:
 				value = uuid.NewString()
-			case "unixnano()":
+			case defaultEntryUnixNano:
 				value = time.Now().UnixNano()
-			case "auto()":
+			case defaultEntryAuto:
 				value = auto
 			default:
-				value = v
+				value = entry.value
 			}
-			item[k] = value
+			item[entry.key] = value
 		}
 	}
 
@@ -308,6 +333,7 @@ func (c *Collection) SetDefaults(defaults map[string]any) error {
 func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 
 	c.Defaults = defaults
+	c.defaultItems = buildDefaultEntries(defaults)
 
 	if !persist {
 		return nil
@@ -327,6 +353,33 @@ func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
 	}
 
 	return c.EncodeCommand(command)
+}
+
+func buildDefaultEntries(defaults map[string]any) []defaultEntry {
+	if len(defaults) == 0 {
+		return nil
+	}
+
+	entries := make([]defaultEntry, 0, len(defaults))
+	for key, value := range defaults {
+		entry := defaultEntry{key: key, kind: defaultEntryStatic, value: value}
+		if s, ok := value.(string); ok {
+			switch s {
+			case "uuid()":
+				entry.kind = defaultEntryUUID
+				entry.value = nil
+			case "unixnano()":
+				entry.kind = defaultEntryUnixNano
+				entry.value = nil
+			case "auto()":
+				entry.kind = defaultEntryAuto
+				entry.value = nil
+			}
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries
 }
 
 // IndexMap create a unique index with a name
@@ -357,12 +410,14 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 	}
 
 	c.Indexes[name] = index
+	c.indexEntries = append(c.indexEntries, &collectionIndexEntry{name: name, index: index})
 
 	// Add all rows to the index
 	for _, row := range c.Rows {
 		err := index.AddRow(row)
 		if err != nil {
 			delete(c.Indexes, name)
+			c.removeIndexEntry(name)
 			return fmt.Errorf("index row: %s, data: %s", err.Error(), string(row.Payload))
 		}
 	}
@@ -391,7 +446,16 @@ func (c *Collection) createIndex(name string, options interface{}, persist bool)
 	return c.EncodeCommand(command)
 }
 
-func indexInsert(indexes map[string]*collectionIndex, row *Row) (err error) {
+func (c *Collection) removeIndexEntry(name string) {
+	for i, entry := range c.indexEntries {
+		if entry.name == name {
+			c.indexEntries = append(c.indexEntries[:i], c.indexEntries[i+1:]...)
+			return
+		}
+	}
+}
+
+func indexInsert(indexes []*collectionIndexEntry, row *Row) (err error) {
 
 	// Note: rollbacks array should be kept in stack if it is smaller than 65536 bytes, so
 	// our recommended maximum number of indexes should NOT exceed 8192 indexes
@@ -408,10 +472,11 @@ func indexInsert(indexes map[string]*collectionIndex, row *Row) (err error) {
 		}
 	}()
 
-	for key, index := range indexes {
+	for _, entry := range indexes {
+		index := entry.index
 		err = index.AddRow(row)
 		if err != nil {
-			return fmt.Errorf("index add '%s': %s", key, err.Error())
+			return fmt.Errorf("index add '%s': %s", entry.name, err.Error())
 		}
 
 		rollbacks[c] = index
@@ -421,12 +486,12 @@ func indexInsert(indexes map[string]*collectionIndex, row *Row) (err error) {
 	return
 }
 
-func indexRemove(indexes map[string]*collectionIndex, row *Row) (err error) {
-	for key, index := range indexes {
-		err = index.RemoveRow(row)
+func indexRemove(indexes []*collectionIndexEntry, row *Row) (err error) {
+	for _, entry := range indexes {
+		err = entry.index.RemoveRow(row)
 		if err != nil {
 			// TODO: does this make any sense?
-			return fmt.Errorf("index remove '%s': %s", key, err.Error())
+			return fmt.Errorf("index remove '%s': %s", entry.name, err.Error())
 		}
 	}
 
@@ -453,7 +518,7 @@ func (c *Collection) removeByRow(row *Row, persist bool) error { // todo: rename
 			return fmt.Errorf("row %d does not exist", i)
 		}
 
-		err := indexRemove(c.Indexes, row)
+		err := indexRemove(c.indexEntries, row)
 		if err != nil {
 			return fmt.Errorf("could not free index")
 		}
@@ -521,14 +586,14 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	}
 
 	// index update
-	err = indexRemove(c.Indexes, row)
+	err = indexRemove(c.indexEntries, row)
 	if err != nil {
 		return fmt.Errorf("indexRemove: %w", err)
 	}
 
 	row.Payload = newPayload
 
-	err = indexInsert(c.Indexes, row)
+	err = indexInsert(c.indexEntries, row)
 	if err != nil {
 		return fmt.Errorf("indexInsert: %w", err)
 	}
@@ -559,6 +624,86 @@ func (c *Collection) patchByRow(row *Row, patch interface{}, persist bool) error
 	}
 
 	return c.EncodeCommand(command)
+}
+
+type mergeDiffEntry struct {
+	key   string
+	value interface{}
+}
+
+type mergeDiffObject struct {
+	entries []mergeDiffEntry
+}
+
+func newMergeDiffObject(capacity int) *mergeDiffObject {
+	return &mergeDiffObject{entries: make([]mergeDiffEntry, 0, capacity)}
+}
+
+func (m *mergeDiffObject) append(key string, value interface{}) {
+	m.entries = append(m.entries, mergeDiffEntry{key: key, value: value})
+}
+
+func (m *mergeDiffObject) MarshalJSON() ([]byte, error) {
+	if m == nil {
+		return []byte("null"), nil
+	}
+	obj := make(map[string]interface{}, len(m.entries))
+	for _, entry := range m.entries {
+		obj[entry.key] = entry.value
+	}
+	return json.Marshal(obj)
+}
+
+func (m *mergeDiffObject) UnmarshalJSON(data []byte) error {
+	if m == nil {
+		return fmt.Errorf("mergeDiffObject: nil receiver")
+	}
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		m.entries = nil
+		return nil
+	}
+	raw := map[string]json.RawMessage{}
+	if err := json.Unmarshal(trimmed, &raw); err != nil {
+		return err
+	}
+	entries := make([]mergeDiffEntry, 0, len(raw))
+	for key, value := range raw {
+		decoded, err := decodeMergeDiffRaw(value)
+		if err != nil {
+			return err
+		}
+		entries = append(entries, mergeDiffEntry{key: key, value: decoded})
+	}
+	m.entries = entries
+	return nil
+}
+
+func decodeMergeDiffRaw(raw json.RawMessage) (interface{}, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	switch trimmed[0] {
+	case '{':
+		var obj mergeDiffObject
+		if err := json.Unmarshal(trimmed, &obj); err != nil {
+			return nil, err
+		}
+		return &obj, nil
+	case '[':
+		var arr []interface{}
+		if err := json.Unmarshal(trimmed, &arr); err != nil {
+			return nil, err
+		}
+		return arr, nil
+	default:
+		var value interface{}
+		if err := json.Unmarshal(trimmed, &value); err != nil {
+			return nil, err
+		}
+		return value, nil
+	}
 }
 
 func decodeJSONValue(raw json.RawMessage) (interface{}, error) {
@@ -593,6 +738,19 @@ func normalizeJSONValue(value interface{}) (interface{}, error) {
 			normalized[key] = nv
 		}
 		return normalized, nil
+	case *mergeDiffObject:
+		for i := range v.entries {
+			item := v.entries[i].value
+			if item == nil {
+				continue
+			}
+			nv, err := normalizeJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			v.entries[i].value = nv
+		}
+		return v, nil
 	case []interface{}:
 		normalized := make([]interface{}, len(v))
 		for i, item := range v {
@@ -611,6 +769,49 @@ func normalizeJSONValue(value interface{}) (interface{}, error) {
 func applyMergePatchValue(original interface{}, patch interface{}) (interface{}, bool, error) {
 
 	switch p := patch.(type) {
+	case *mergeDiffObject:
+		var originalMap map[string]interface{}
+		if m, ok := original.(map[string]interface{}); ok {
+			originalMap = m
+		}
+
+		result := make(map[string]interface{}, len(originalMap)+len(p.entries))
+		for k, v := range originalMap {
+			result[k] = cloneJSONValue(v)
+		}
+
+		changed := false
+		for _, entry := range p.entries {
+			if entry.value == nil {
+				if _, exists := result[entry.key]; exists {
+					delete(result, entry.key)
+					changed = true
+				}
+				continue
+			}
+
+			originalValue := interface{}(nil)
+			if originalMap != nil {
+				originalValue, _ = originalMap[entry.key]
+			}
+
+			mergedValue, valueChanged, err := applyMergePatchValue(originalValue, entry.value)
+			if err != nil {
+				return nil, false, err
+			}
+
+			if originalMap == nil {
+				changed = true
+			} else {
+				if _, exists := originalMap[entry.key]; !exists || valueChanged {
+					changed = true
+				}
+			}
+
+			result[entry.key] = mergedValue
+		}
+
+		return result, changed, nil
 	case map[string]interface{}:
 		var originalMap map[string]interface{}
 		if m, ok := original.(map[string]interface{}); ok {
@@ -682,12 +883,12 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 			return cloneJSONValue(modified), true
 		}
 
-		diff := make(map[string]interface{})
+		diff := newMergeDiffObject(len(o) + len(modifiedMap))
 		changed := false
 
 		for k := range o {
 			if _, exists := modifiedMap[k]; !exists {
-				diff[k] = nil
+				diff.append(k, nil)
 				changed = true
 			}
 		}
@@ -695,7 +896,7 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 		for k, mv := range modifiedMap {
 			ov, exists := o[k]
 			if !exists {
-				diff[k] = cloneJSONValue(mv)
+				diff.append(k, cloneJSONValue(mv))
 				changed = true
 				continue
 			}
@@ -704,7 +905,7 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 				if mm, ok := mv.(map[string]interface{}); ok {
 					subDiff, subChanged := createMergeDiff(om, mm)
 					if subChanged {
-						diff[k] = subDiff
+						diff.append(k, subDiff)
 						changed = true
 					}
 					continue
@@ -714,7 +915,7 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 			if oa, ok := ov.([]interface{}); ok {
 				if ma, ok := mv.([]interface{}); ok {
 					if !reflect.DeepEqual(oa, ma) {
-						diff[k] = cloneJSONValue(mv)
+						diff.append(k, cloneJSONValue(mv))
 						changed = true
 					}
 					continue
@@ -722,7 +923,7 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 			}
 
 			if !reflect.DeepEqual(ov, mv) {
-				diff[k] = cloneJSONValue(mv)
+				diff.append(k, cloneJSONValue(mv))
 				changed = true
 			}
 		}
@@ -827,6 +1028,7 @@ func (c *Collection) dropIndex(name string, persist bool) error {
 		return fmt.Errorf("dropIndex: index '%s' not found", name)
 	}
 	delete(c.Indexes, name)
+	c.removeIndexEntry(name)
 
 	if !persist {
 		return nil

@@ -3,7 +3,6 @@ package apicollectionv1
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -55,16 +54,12 @@ func createIndex(ctx context.Context, r *http.Request) (*listIndexesItem, error)
 		return nil, err // todo: handle/wrap this properly
 	}
 
-	var options interface{}
-
-	switch input.Type {
-	case "map":
-		options = &collection.IndexMapOptions{}
-	case "btree":
-		options = &collection.IndexBTreeOptions{}
-	default:
-		return nil, fmt.Errorf("unexpected type '%s' instead of [map|btree]", input.Type)
+	definition, err := collection.GetIndexDefinitionByType(input.Type)
+	if err != nil {
+		return nil, err
 	}
+
+	options := definition.NewOptions()
 
 	err = json.Unmarshal(requestBody, &options)
 	if err != nil {

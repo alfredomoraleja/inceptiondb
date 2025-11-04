@@ -122,6 +122,28 @@ func TestIndex(t *testing.T) {
 	})
 }
 
+func TestIndexHashAllowsDuplicates(t *testing.T) {
+	Environment(func(filename string) {
+		c, _ := OpenCollection(filename)
+		defer c.Close()
+
+		item := map[string]interface{}{"category": "tools", "value": "hammer"}
+		c.Insert(item)
+		c.Insert(map[string]interface{}{"category": "tools", "value": "wrench"})
+
+		err := c.Index("category-hash", &IndexHashOptions{Field: "category"})
+		AssertNil(err)
+
+		count := 0
+		c.Indexes["category-hash"].Traverse([]byte(`{"value":"tools"}`), func(row *Row) bool {
+			count++
+			return true
+		})
+
+		AssertEqual(count, 2)
+	})
+}
+
 func findByIndex(index Index, options string, value interface{}) (n int) {
 	index.Traverse([]byte(options), func(row *Row) bool {
 		n++

@@ -8,6 +8,7 @@ import (
 	"github.com/fulldump/box"
 
 	"github.com/fulldump/inceptiondb/service"
+	"github.com/fulldump/inceptiondb/utils"
 )
 
 type setDefaultsInput map[string]any
@@ -31,24 +32,26 @@ func setDefaults(ctx context.Context, w http.ResponseWriter, r *http.Request) er
 		return err // todo: handle/wrap this properly
 	}
 
-	defaults := col.Defaults
+	incoming := utils.JSONObject{}
 
-	err = json.NewDecoder(r.Body).Decode(&defaults)
-	if err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
 		return err // todo: handle/wrap this properly
 	}
 
-	for k, v := range defaults {
-		if v == nil {
-			delete(defaults, k)
+	cleaned := utils.JSONObject{}
+	for _, field := range incoming {
+		if field.Value == nil {
+			continue
 		}
+		cleaned.Set(field.Key, field.Value)
 	}
 
-	if len(defaults) == 0 {
-		defaults = nil
+	var defaultsMap map[string]any
+	if len(cleaned) > 0 {
+		defaultsMap = cleaned.ToMap()
 	}
 
-	err = col.SetDefaults(defaults)
+	err = col.SetDefaults(defaultsMap)
 	if err != nil {
 		return err
 	}

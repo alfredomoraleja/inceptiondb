@@ -27,7 +27,7 @@ type Collection struct {
 	rowsMutex    *sync.Mutex
 	Indexes      map[string]*collectionIndex // todo: protect access with mutex or use sync.Map
 	buffer       *bufio.Writer               // TODO: use write buffer to improve performance (x3 in tests)
-	Defaults     map[string]any
+	Defaults     utils.JSONObject
 	Count        int64
 	encoderMutex *sync.Mutex
 }
@@ -155,7 +155,7 @@ func OpenCollection(filename string) (*Collection, error) {
 		case "patch":
 			params := struct {
 				I    int
-				Diff map[string]interface{}
+				Diff utils.JSONObject
 			}{}
 			json.Unmarshal(command.Payload, &params)
 			row := collection.Rows[params.I] // this access is threadsafe, OpenCollection is a secuence
@@ -164,7 +164,7 @@ func OpenCollection(filename string) (*Collection, error) {
 				fmt.Printf("WARNING: patch item %d: %s\n", params.I, err.Error())
 			}
 		case "set_defaults":
-			defaults := map[string]any{}
+			defaults := utils.JSONObject{}
 			json.Unmarshal(command.Payload, &defaults)
 			collection.setDefaults(defaults, false)
 		}
@@ -207,35 +207,47 @@ func (c *Collection) Insert(item map[string]any) (*Row, error) {
 		return nil, fmt.Errorf("collection is closed")
 	}
 
+	normalizedItem, err := utils.NormalizeJSONValue(item)
+	if err != nil {
+		return nil, fmt.Errorf("normalize payload: %w", err)
+	}
+
+	doc, ok := normalizedItem.(utils.JSONObject)
+	if !ok {
+		return nil, fmt.Errorf("normalize payload: expected object but got %T", normalizedItem)
+	}
+
 	auto := atomic.AddInt64(&c.Count, 1)
 
 	if c.Defaults != nil {
-		// item := map[string]any{} // todo: item is shadowed, choose a better name
-		// err := json.Unmarshal(payload, &item)
-		// if err != nil {
-		// 	return nil, fmt.Errorf("json encode defaults: %w", err)
-		// }
-
-		for k, v := range c.Defaults {
-			if item[k] != nil {
+		for _, field := range c.Defaults {
+			value, exists := doc.Get(field.Key)
+			if exists && value != nil {
 				continue
 			}
-			var value any
-			switch v {
-			case "uuid()":
-				value = uuid.NewString()
-			case "unixnano()":
-				value = time.Now().UnixNano()
-			case "auto()":
-				value = auto
+
+			var defaultValue any
+			switch v := field.Value.(type) {
+			case string:
+				switch v {
+				case "uuid()":
+					defaultValue = uuid.NewString()
+				case "unixnano()":
+					defaultValue = time.Now().UnixNano()
+				case "auto()":
+					defaultValue = auto
+				default:
+					defaultValue = v
+				}
 			default:
-				value = v
+				defaultValue = field.Value
 			}
-			item[k] = value
+
+			doc.Set(field.Key, defaultValue)
 		}
 	}
 
-	payload, err := json.Marshal(item)
+	payload, err := json.Marshal(doc)
 	if err != nil {
 		return nil, fmt.Errorf("json encode payload: %w", err)
 	}
@@ -302,18 +314,32 @@ type CreateIndexCommand struct {
 }
 
 func (c *Collection) SetDefaults(defaults map[string]any) error {
-	return c.setDefaults(defaults, true)
+	normalized, err := utils.NormalizeJSONValue(defaults)
+	if err != nil {
+		return fmt.Errorf("normalize defaults: %w", err)
+	}
+
+	obj, ok := normalized.(utils.JSONObject)
+	if !ok {
+		return fmt.Errorf("normalize defaults: expected object but got %T", normalized)
+	}
+
+	return c.setDefaults(obj, true)
 }
 
-func (c *Collection) setDefaults(defaults map[string]any, persist bool) error {
+func (c *Collection) setDefaults(defaults utils.JSONObject, persist bool) error {
 
-	c.Defaults = defaults
+	if len(defaults) == 0 {
+		c.Defaults = nil
+	} else {
+		c.Defaults = defaults
+	}
 
 	if !persist {
 		return nil
 	}
 
-	payload, err := json.Marshal(defaults)
+	payload, err := json.Marshal(c.Defaults)
 	if err != nil {
 		return fmt.Errorf("json encode payload: %w", err)
 	}
@@ -571,91 +597,69 @@ func decodeJSONValue(raw json.RawMessage) (interface{}, error) {
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return nil, err
 	}
-	return value, nil
+	return utils.NormalizeJSONValue(value)
 }
 
 func normalizeJSONValue(value interface{}) (interface{}, error) {
-
-	switch v := value.(type) {
-	case json.RawMessage:
-		var decoded interface{}
-		if err := json.Unmarshal(v, &decoded); err != nil {
-			return nil, err
-		}
-		return normalizeJSONValue(decoded)
-	case map[string]interface{}:
-		normalized := make(map[string]interface{}, len(v))
-		for key, item := range v {
-			nv, err := normalizeJSONValue(item)
-			if err != nil {
-				return nil, err
-			}
-			normalized[key] = nv
-		}
-		return normalized, nil
-	case []interface{}:
-		normalized := make([]interface{}, len(v))
-		for i, item := range v {
-			nv, err := normalizeJSONValue(item)
-			if err != nil {
-				return nil, err
-			}
-			normalized[i] = nv
-		}
-		return normalized, nil
-	default:
-		return v, nil
-	}
+	return utils.NormalizeJSONValue(value)
 }
 
 func applyMergePatchValue(original interface{}, patch interface{}) (interface{}, bool, error) {
 
 	switch p := patch.(type) {
 	case map[string]interface{}:
-		var originalMap map[string]interface{}
-		if m, ok := original.(map[string]interface{}); ok {
-			originalMap = m
+		normalized, err := utils.NormalizeJSONValue(p)
+		if err != nil {
+			return nil, false, err
+		}
+		return applyMergePatchValue(original, normalized)
+	case utils.JSONObject:
+		var originalObj utils.JSONObject
+		switch o := original.(type) {
+		case utils.JSONObject:
+			originalObj = o
+		case map[string]interface{}:
+			onormalized, err := utils.NormalizeJSONValue(o)
+			if err != nil {
+				return nil, false, err
+			}
+			if obj, ok := onormalized.(utils.JSONObject); ok {
+				originalObj = obj
+			}
 		}
 
-		result := make(map[string]interface{}, len(originalMap)+len(p))
-		for k, v := range originalMap {
-			result[k] = cloneJSONValue(v)
-		}
-
+		result := originalObj.Clone()
 		changed := false
-		for k, item := range p {
-			if item == nil {
-				if _, exists := result[k]; exists {
-					delete(result, k)
+
+		for _, field := range p {
+			if field.Value == nil {
+				if result.Delete(field.Key) {
 					changed = true
 				}
 				continue
 			}
 
 			originalValue := interface{}(nil)
-			if originalMap != nil {
-				originalValue, _ = originalMap[k]
+			exists := false
+			if originalObj != nil {
+				originalValue, exists = originalObj.Get(field.Key)
 			}
 
-			mergedValue, valueChanged, err := applyMergePatchValue(originalValue, item)
+			mergedValue, valueChanged, err := applyMergePatchValue(originalValue, field.Value)
 			if err != nil {
 				return nil, false, err
 			}
 
-			if originalMap == nil {
+			if !exists || valueChanged {
 				changed = true
-			} else {
-				if _, exists := originalMap[k]; !exists || valueChanged {
-					changed = true
-				}
 			}
 
-			result[k] = mergedValue
+			result.Set(field.Key, mergedValue)
 		}
 
 		return result, changed, nil
 	case []interface{}:
-		cloned := cloneJSONArray(p)
+		cloned := utils.CloneJSONArray(p)
 		if current, ok := original.([]interface{}); ok {
 			if reflect.DeepEqual(current, cloned) {
 				return cloned, false, nil
@@ -664,9 +668,9 @@ func applyMergePatchValue(original interface{}, patch interface{}) (interface{},
 		return cloned, true, nil
 	default:
 		if reflect.DeepEqual(original, p) {
-			return cloneJSONValue(p), false, nil
+			return utils.CloneJSONValue(p), false, nil
 		}
-		return cloneJSONValue(p), true, nil
+		return utils.CloneJSONValue(p), true, nil
 	}
 }
 
@@ -674,37 +678,53 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 
 	switch o := original.(type) {
 	case map[string]interface{}:
-		modifiedMap, ok := modified.(map[string]interface{})
+		normalized, err := utils.NormalizeJSONValue(o)
+		if err != nil {
+			return utils.CloneJSONValue(modified), true
+		}
+		return createMergeDiff(normalized, modified)
+	case utils.JSONObject:
+		modifiedObj, ok := modified.(utils.JSONObject)
 		if !ok {
+			if m, ok := modified.(map[string]interface{}); ok {
+				normalized, err := utils.NormalizeJSONValue(m)
+				if err == nil {
+					if obj, ok := normalized.(utils.JSONObject); ok {
+						modifiedObj = obj
+					}
+				}
+			}
+		}
+		if modifiedObj == nil {
 			if reflect.DeepEqual(original, modified) {
 				return nil, false
 			}
-			return cloneJSONValue(modified), true
+			return utils.CloneJSONValue(modified), true
 		}
 
-		diff := make(map[string]interface{})
+		diff := utils.JSONObject{}
 		changed := false
 
-		for k := range o {
-			if _, exists := modifiedMap[k]; !exists {
-				diff[k] = nil
+		for _, field := range o {
+			if _, exists := modifiedObj.Get(field.Key); !exists {
+				diff.Set(field.Key, nil)
 				changed = true
 			}
 		}
 
-		for k, mv := range modifiedMap {
-			ov, exists := o[k]
+		for _, field := range modifiedObj {
+			ov, exists := o.Get(field.Key)
 			if !exists {
-				diff[k] = cloneJSONValue(mv)
+				diff.Set(field.Key, utils.CloneJSONValue(field.Value))
 				changed = true
 				continue
 			}
 
-			if om, ok := ov.(map[string]interface{}); ok {
-				if mm, ok := mv.(map[string]interface{}); ok {
+			if om, ok := ov.(utils.JSONObject); ok {
+				if mm, ok := field.Value.(utils.JSONObject); ok {
 					subDiff, subChanged := createMergeDiff(om, mm)
 					if subChanged {
-						diff[k] = subDiff
+						diff.Set(field.Key, subDiff)
 						changed = true
 					}
 					continue
@@ -712,17 +732,17 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 			}
 
 			if oa, ok := ov.([]interface{}); ok {
-				if ma, ok := mv.([]interface{}); ok {
+				if ma, ok := field.Value.([]interface{}); ok {
 					if !reflect.DeepEqual(oa, ma) {
-						diff[k] = cloneJSONValue(mv)
+						diff.Set(field.Key, utils.CloneJSONValue(field.Value))
 						changed = true
 					}
 					continue
 				}
 			}
 
-			if !reflect.DeepEqual(ov, mv) {
-				diff[k] = cloneJSONValue(mv)
+			if !reflect.DeepEqual(ov, field.Value) {
+				diff.Set(field.Key, utils.CloneJSONValue(field.Value))
 				changed = true
 			}
 		}
@@ -736,54 +756,26 @@ func createMergeDiff(original interface{}, modified interface{}) (interface{}, b
 			if reflect.DeepEqual(o, ma) {
 				return nil, false
 			}
-			return cloneJSONValue(ma), true
+			return utils.CloneJSONValue(ma), true
 		}
 		if reflect.DeepEqual(original, modified) {
 			return nil, false
 		}
-		return cloneJSONValue(modified), true
+		return utils.CloneJSONValue(modified), true
 	default:
 		if reflect.DeepEqual(original, modified) {
 			return nil, false
 		}
-		return cloneJSONValue(modified), true
+		return utils.CloneJSONValue(modified), true
 	}
 }
 
 func cloneJSONValue(value interface{}) interface{} {
-
-	switch v := value.(type) {
-	case map[string]interface{}:
-		cloned := make(map[string]interface{}, len(v))
-		for k, item := range v {
-			cloned[k] = cloneJSONValue(item)
-		}
-		return cloned
-	case []interface{}:
-		return cloneJSONArray(v)
-	case json.RawMessage:
-		if v == nil {
-			return nil
-		}
-		cloned := make(json.RawMessage, len(v))
-		copy(cloned, v)
-		return cloned
-	default:
-		return v
-	}
+	return utils.CloneJSONValue(value)
 }
 
 func cloneJSONArray(values []interface{}) []interface{} {
-
-	if values == nil {
-		return nil
-	}
-
-	cloned := make([]interface{}, len(values))
-	for i, item := range values {
-		cloned[i] = cloneJSONValue(item)
-	}
-	return cloned
+	return utils.CloneJSONArray(values)
 }
 
 func (c *Collection) Close() error {

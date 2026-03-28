@@ -10,4 +10,5 @@ type Configuration struct {
 	ShowBanner        bool   `usage:"show big banner"`
 	ShowConfig        bool   `usage:"print config"`
 	EnableCompression bool   `usage:"enable http compression (gzip)"`
+	MongoAddr         string `usage:"MongoDB wire compatibility listener"`
 }
